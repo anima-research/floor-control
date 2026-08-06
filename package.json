@@ -1,0 +1,16 @@
+{
+  "name": "@animalabs/floor-control",
+  "version": "0.0.1",
+  "description": "Medium-agnostic floor control: the order book for speaking turns (FLOOR-RFC-001 reference service)",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.5.0"
+  }
+}
