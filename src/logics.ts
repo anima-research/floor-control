@@ -45,33 +45,71 @@ export interface Logic {
 export class FluidFairnessLogic implements Logic {
   readonly contract: LogicContract;
   private lastHeld = new Map<string, number>();
+  /** Consecutive lease expiries per participant; cleared by any responsive
+   *  terminal (release/decline/revoke). Trial FINDING-1: an expired grant
+   *  consumed the scarce resource too — it must charge fairness history, and
+   *  a repeatedly-unresponsive bidder must not recapture the floor forever. */
+  private strikes = new Map<string, number>();
+  private lastExpiredAt = new Map<string, number>();
   private readonly leaseMs: number;
+  private readonly expiryBackoffMs: number;
+  private readonly expiryBackoffCapMs: number;
 
-  constructor(opts?: { leaseMs?: number; knobs?: Record<string, unknown> }) {
+  constructor(opts?: {
+    leaseMs?: number;
+    expiryBackoffMs?: number;
+    expiryBackoffCapMs?: number;
+    knobs?: Record<string, unknown>;
+  }) {
     this.leaseMs = opts?.leaseMs ?? 30_000;
+    this.expiryBackoffMs = opts?.expiryBackoffMs ?? this.leaseMs * 2;
+    this.expiryBackoffCapMs = opts?.expiryBackoffCapMs ?? this.leaseMs * 8;
     this.contract = {
       logicId: 'fluid-fairness',
-      version: 1,
+      version: 2,
       bidFields: {
         readinessKind: 'intent | prepared | urgent',
         subjectRef: 'optional — what the turn answers',
       },
       queueVisibility: 'full',
-      eventShapes: ['floor:grant', 'floor:hold', 'floor:state'],
+      eventShapes: ['floor:grant', 'floor:hold', 'floor:state', 'floor:idle'],
       api: [],
-      knobs: { leaseMs: this.leaseMs, ...(opts?.knobs ?? {}) },
+      knobs: {
+        leaseMs: this.leaseMs,
+        expiryBackoffMs: this.expiryBackoffMs,
+        expiryBackoffCapMs: this.expiryBackoffCapMs,
+        ...(opts?.knobs ?? {}),
+      },
       moderation: [],
     };
   }
 
   noteTerminal(participantId: string, at: number): void {
     this.lastHeld.set(participantId, at);
+    this.strikes.delete(participantId); // a responsive terminal clears strikes
+  }
+
+  /** An expired lease charges held-history AND accrues a strike: backoff
+   *  doubles per consecutive expiry, bounded by expiryBackoffCapMs. */
+  noteExpired(participantId: string, at: number): void {
+    this.lastHeld.set(participantId, at);
+    this.strikes.set(participantId, (this.strikes.get(participantId) ?? 0) + 1);
+    this.lastExpiredAt.set(participantId, at);
+  }
+
+  private eligible(participantId: string, now: number): boolean {
+    const s = this.strikes.get(participantId);
+    if (!s) return true;
+    const backoff = Math.min(this.expiryBackoffCapMs, this.expiryBackoffMs * 2 ** (s - 1));
+    return now >= (this.lastExpiredAt.get(participantId) ?? 0) + backoff;
   }
 
   decide(book: FloorBook, now: number): LogicDecision {
     if (book.liveGrant) return { kind: 'hold', reason: 'floor occupied' };
     const open = book.openBids();
     if (open.length === 0) return { kind: 'hold', reason: 'no open bids' };
+    const ready = open.filter((b) => this.eligible(b.participantId, now));
+    if (ready.length === 0) return { kind: 'hold', reason: 'all open bids in expiry backoff' };
     const pick = (candidates: Bid[]): Bid =>
       candidates.slice().sort((a, b) => {
         const ha = this.lastHeld.get(a.participantId) ?? -1;
@@ -79,8 +117,8 @@ export class FluidFairnessLogic implements Logic {
         if (ha !== hb) return ha - hb; // least-recently-held first; never-held (-1) wins
         return a.createdAt - b.createdAt; // then arrival order
       })[0];
-    const urgent = open.filter((b) => b.readinessKind === 'urgent');
-    const chosen = urgent.length > 0 ? pick(urgent) : pick(open);
+    const urgent = ready.filter((b) => b.readinessKind === 'urgent');
+    const chosen = urgent.length > 0 ? pick(urgent) : pick(ready);
     return { kind: 'grant', bidId: chosen.bidId, bidRevision: chosen.revision, leaseMs: this.leaseMs };
   }
 }

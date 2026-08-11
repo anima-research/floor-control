@@ -25,7 +25,12 @@ function rig(opts: { leaseMs: number; bots: BotOptions[]; exemptIds?: string[]; 
   const host = new FloorRoomHost(
     new LoopbackTransport(bus, 'floor-service', 'floor-service'),
     new FluidFairnessLogic({ leaseMs: opts.leaseMs }),
-    { tickMs: 50, exemptIds: ['ra-human', ...(opts.exemptIds ?? [])], ledgerPath: opts.ledger },
+    {
+      tickMs: 50,
+      idleAfterMs: 1200,
+      exemptIds: ['ra-human', ...(opts.exemptIds ?? [])],
+      ledgerPath: opts.ledger,
+    },
   );
   const bots = opts.bots.map(
     (b) => new ScriptedBot(new LoopbackTransport(bus, b.name, b.name), b.name, b),
@@ -106,8 +111,8 @@ const scenarios: Scenario[] = [
     },
   },
   {
-    name: 'S3 unresponsive holder — lease expires; KNOWN GAP: expiry skips fairness history, dead bidder recaptures the floor',
-    gate: 'grant-before-cost / FINDING-1',
+    name: 'S3 unresponsive holder — lease expires, expiry charges fairness history, live participant proceeds (FINDING-1 patched)',
+    gate: 'grant-before-cost / FINDING-1 regression (fails on pre-patch code)',
     async run() {
       const { bus, host, bots } = rig({
         leaseMs: 400,
@@ -120,17 +125,15 @@ const scenarios: Scenario[] = [
       for (const b of bots) await b.start();
       await sleep(100);
       bus.post('ra-human', 'ra-human', 'room', 'seed: anyone home?');
-      await sleep(4000);
+      await sleep(6000);
       host.stop();
       const expired = host.book.eventLog().filter((e) => e.type === 'grant/expired').length;
-      const starved = bots[1].turnsTaken === 0;
-      // The gap REPRODUCING is this scenario's expected outcome: tick-expiry
-      // never reaches FluidFairnessLogic.noteTerminal, the sleeper stays
-      // "never held", its reopened bid wins every arbitration, and the live
-      // participant starves. The fix belongs in the reference service; this
-      // scenario is its regression test in waiting.
-      const pass = expired >= 2 && starved;
-      return { pass, detail: `expired=${expired} aliveTurns=${bots[1].turnsTaken} (starved=${starved})` };
+      // Pre-patch this starved `alive` behind nine straight sleeper expiries
+      // (expiry never reached fairness history, the reopened bid stayed
+      // "never held"). Patched: the expiry charges held-history + a strike
+      // backoff, so the live participant proceeds.
+      const pass = expired >= 1 && bots[1].turnsTaken >= 2;
+      return { pass, detail: `expired=${expired} aliveTurns=${bots[1].turnsTaken}` };
     },
   },
   {
@@ -148,13 +151,10 @@ const scenarios: Scenario[] = [
       for (const b of bots) await b.start();
       await sleep(100);
       bus.post('ra-human', 'ra-human', 'room', 'seed: manners optional.');
-      // FINDING-2 mitigation, human-shaped: speech-triggered rebidding means
-      // an all-quiet moment deadlocks the room (everyone waits for someone
-      // else to speak). A human nudge breaks it — the protocol question this
-      // raises (standing bids? idle re-arbitration?) goes in the trial notes.
-      const nudger = setInterval(() => bus.post('ra-human', 'ra-human', 'room', 'nudge: still here.'), 1500);
+      // FINDING-2, Mica's shape: no human nudge — quiet-room liveness comes
+      // from the host's logged floor/idle event, which standing-ready bots
+      // treat as a bid opportunity.
       await until(() => host.violations.length >= 1 && bots[0].turnsTaken >= 2, 15_000);
-      clearInterval(nudger);
       host.stop();
       const pass = host.violations.length >= 1 && bots[0].turnsTaken >= 2;
       return { pass, detail: `violations=${host.violations.length} politeTurns=${bots[0].turnsTaken}` };

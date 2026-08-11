@@ -24,6 +24,11 @@ export interface HostOptions {
   ledgerPath?: string;
   /** participantIds exempt from compliance audit (humans, per Session 1). */
   exemptIds?: string[];
+  /** Quiet-room liveness (FINDING-2, Mica's shape): after this much silence
+   *  with a free floor and an empty book, the host emits a logged
+   *  `floor/idle` event that wake policies and standing-ready clients can
+   *  target — liveness never depends on an unlogged human nudge. */
+  idleAfterMs?: number;
 }
 
 export class FloorRoomHost {
@@ -34,6 +39,8 @@ export class FloorRoomHost {
   private bidCounter = 0;
   private lastSeq = 0;
   private lastRoomMessageId: string | null = null;
+  private lastActivityAt = Date.now();
+  private lastIdleAt = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   readonly violations: Array<{ at: number; participantId: string; messageId: string }> = [];
 
@@ -77,6 +84,7 @@ export class FloorRoomHost {
   private onMessage(m: InboundMessage): void {
     if (m.surface === 'room') {
       this.lastRoomMessageId = m.messageId;
+      this.lastActivityAt = m.at;
       this.audit(m);
       this.pump();
       return;
@@ -187,12 +195,34 @@ export class FloorRoomHost {
     const now = Date.now();
     const { grant } = this.service.arbitrate(this.roomId, now);
     this.flush(grant);
+    this.checkIdle(now);
+  }
+
+  private checkIdle(now: number): void {
+    const idleAfter = this.opts.idleAfterMs ?? 60_000;
+    // Open-but-ungrantable bids (expiry backoff) do NOT veto idleness: if a
+    // grantable bid existed, this pump's arbitrate would have granted it and
+    // liveGrant would be set. An idle floor with a stuck book is still idle.
+    if (this.book.liveGrant) return;
+    if (now - Math.max(this.lastActivityAt, this.lastIdleAt) < idleAfter) return;
+    this.lastIdleAt = now;
+    this.ledger({ kind: 'idle', at: now, quietMs: now - this.lastActivityAt });
+    void this.transport.sendControl(
+      eventLine('floor/idle', { quietMs: now - this.lastActivityAt, openBids: 0, holder: 'none' }),
+    );
   }
 
   private flush(offered?: Grant): void {
     for (const e of this.book.eventLog()) {
       if (e.seq <= this.lastSeq) continue;
       this.lastSeq = e.seq;
+      // A grant that was offered and then merely expired is a FAILED cycle,
+      // not progress — it must not keep resetting the idle clock while an
+      // unresponsive bidder churns (otherwise the room can never signal
+      // open-floor to standing-ready participants).
+      if (e.type !== 'grant/offered' && e.type !== 'grant/expired') {
+        this.lastActivityAt = e.at;
+      }
       this.ledger({ kind: 'event', ...e });
       const mention =
         offered && e.type === 'grant/offered' && e.data.grantId === offered.grantId

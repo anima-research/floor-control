@@ -85,12 +85,43 @@ export class FloorBook {
 
   // ── Bids (§2.2) ──
 
+  /** One open bid per participant: a speaking floor is not an order book —
+   *  one identity cannot consume two concurrent turns. Creating a bid while
+   *  one is already open/stale REPLACES it under the existing stable bidId
+   *  (revision bump, `bid/replaced` in the ledger). Distinct concurrent
+   *  proposals per participant would be an explicit future feature, never an
+   *  accident. (Trial FINDING-3; ruling by Mica 2026-08-11.) */
   createBid(
     env: Omit<BidEnvelope, 'roomId' | 'logicEpoch' | 'contractDigest' | 'revision'>,
     now: number,
   ): Bid {
     if (!this.contract) throw new Error('no active contract: bids bind a contract they acknowledge');
     if (this.bids.has(env.bidId)) throw new Error(`bid ${env.bidId} already exists`);
+    for (const existing of this.bids.values()) {
+      if (existing.participantId !== env.participantId) continue;
+      if (existing.state === 'granted') {
+        throw new Error(`${env.participantId} holds a granted bid (${existing.bidId}); release or decline before rebidding`);
+      }
+      if (existing.state === 'open' || existing.state === 'stale') {
+        if (existing.state === 'stale') {
+          existing.state = 'open';
+          existing.logicEpoch = this.logicEpoch;
+          existing.contractDigest = this.contractDigest;
+        }
+        existing.readinessKind = env.readinessKind;
+        existing.subjectRef = env.subjectRef;
+        existing.expiresAt = env.expiresAt;
+        existing.payload = env.payload;
+        existing.revision += 1;
+        this.emit('bid/replaced', now, {
+          bidId: existing.bidId,
+          participantId: existing.participantId,
+          revision: existing.revision,
+          readinessKind: existing.readinessKind,
+        });
+        return existing;
+      }
+    }
     const bid: Bid = {
       ...env,
       roomId: this.roomId,

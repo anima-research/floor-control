@@ -70,6 +70,15 @@ export class ScriptedBot {
     if (e.type === 'grant/offered' && this.myBidId && e.fields.bidId === this.myBidId) {
       this.grantsSeen += 1;
       await this.onGrant(e.fields.grantId, e.fields.head ?? 'none', m.at);
+      return;
+    }
+    // Standing readiness: a logged floor/idle event is a bid opportunity —
+    // liveness without anyone speaking first (and without a human nudge).
+    if (e.type === 'floor/idle' && this.turnsTaken < (this.opts.maxTurns ?? Infinity)) {
+      if (this.opts.profile !== 'prepared' && !this.myBidId && !this.bidInFlight) {
+        this.bidInFlight = true;
+        await this.transport.sendControl('!floor bid readiness=intent');
+      }
     }
   }
 

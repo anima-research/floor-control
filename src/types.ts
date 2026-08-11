@@ -117,6 +117,7 @@ export interface FloorEvent {
     | 'binding/claimed'
     | 'contract/changed'
     | 'bid/created'
+    | 'bid/replaced'
     | 'bid/amended'
     | 'bid/cancelled'
     | 'bid/staled'

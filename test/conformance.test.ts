@@ -303,3 +303,65 @@ describe('contract digests', () => {
     assert.notEqual(digestContract(c1), digestContract(c3));
   });
 });
+
+describe('an expired lease charges fairness history (FINDING-1, ruling 2026-08-11)', () => {
+  it('after expiry the other bidder is granted; the expired holder is backed off, then eligible again', () => {
+    const room = fluidRoom(svc); // leaseMs 10_000 → backoff 20_000, cap 80_000
+    bid(room.book, 'sleeper', 'b1', T0 + 1);
+    bid(room.book, 'alive', 'b2', T0 + 2);
+    const g1 = svc.arbitrate(room.roomId, T0 + 3).grant;
+    assert.equal(g1?.participantId, 'sleeper', 'arrival order first');
+    // Nobody accepts; the lease expires under the tick.
+    const after = svc.arbitrate(room.roomId, T0 + 20_000);
+    assert.equal(room.book.receiptFor(g1!.grantId)?.terminal, 'expired');
+    assert.equal(after.grant?.participantId, 'alive', 'expiry must not leave the sleeper "never held"');
+    svc.release(room.roomId, after.grant!.grantId, T0 + 21_000);
+    // Sleeper's reopened bid stays ineligible during backoff even with the floor free…
+    const during = svc.arbitrate(room.roomId, T0 + 25_000);
+    assert.equal(during.decision.kind, 'hold', 'sleeper is in expiry backoff');
+    // …and becomes eligible again once the (bounded) backoff has elapsed.
+    const revived = svc.arbitrate(room.roomId, T0 + 20_000 + 20_001);
+    assert.equal(revived.grant?.participantId, 'sleeper');
+  });
+
+  it('a responsive terminal clears strikes', () => {
+    const room = fluidRoom(svc);
+    bid(room.book, 'p', 'b1', T0 + 1);
+    const g1 = svc.arbitrate(room.roomId, T0 + 2).grant!;
+    svc.arbitrate(room.roomId, T0 + 20_000); // expire → strike 1
+    const g2 = svc.arbitrate(room.roomId, T0 + 40_001).grant!; // backoff elapsed, regrant
+    svc.release(room.roomId, g2.grantId, T0 + 40_002); // responsive: strikes clear
+    assert.notEqual(g1.grantId, g2.grantId);
+    bid(room.book, 'p', 'b2', T0 + 40_003);
+    const g3 = svc.arbitrate(room.roomId, T0 + 40_004).grant;
+    assert.equal(g3?.participantId, 'p', 'no residual backoff after a clean release');
+  });
+});
+
+describe('one open bid per participant (FINDING-3, ruling 2026-08-11)', () => {
+  it('a second bid replaces the first under the stable bidId, visibly in the ledger', () => {
+    const room = fluidRoom(svc);
+    const first = bid(room.book, 'mica', 'b1', T0 + 1);
+    const firstRevision = first.revision; // createBid mutates in place: `first` aliases the replacement
+    const second = room.book.createBid(
+      { participantId: 'mica', bidId: 'b2', readinessKind: 'prepared', subjectRef: 'm9', createdAt: T0 + 2, expiresAt: null },
+      T0 + 2,
+    );
+    assert.equal(second.bidId, 'b1', 'stable identity: the replacement keeps the original bidId');
+    assert.equal(second.revision, firstRevision + 1);
+    assert.equal(second.readinessKind, 'prepared');
+    assert.equal(room.book.openBids().length, 1, 'never two concurrent open bids for one identity');
+    const replaced = room.book.eventLog().filter((e) => e.type === 'bid/replaced');
+    assert.equal(replaced.length, 1, 'the replacement is a ledger event');
+  });
+
+  it('rebidding while holding a granted bid is refused', () => {
+    const room = fluidRoom(svc);
+    bid(room.book, 'mica', 'b1', T0 + 1);
+    svc.arbitrate(room.roomId, T0 + 2);
+    assert.throws(
+      () => bid(room.book, 'mica', 'b9', T0 + 3),
+      /release or decline before rebidding/,
+    );
+  });
+});

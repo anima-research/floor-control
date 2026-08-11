@@ -84,7 +84,17 @@ export class FloorService {
    *  logic to grant — bids cannot self-grant. */
   arbitrate(roomId: string, now: number): { decision: LogicDecision; grant?: Grant } {
     const room = this.mustRoom(roomId);
+    const preTick = room.book.liveGrant;
     room.book.tick(now);
+    // A lease that expired under the tick consumed the floor too: charge the
+    // holder's fairness history and strike count (FINDING-1 — without this,
+    // the reopened bid stays "never held" and recaptures the floor forever).
+    if (preTick && !room.book.liveGrant) {
+      const receipt = room.book.receiptFor(preTick.grantId);
+      if (receipt?.terminal === 'expired' && room.logic instanceof FluidFairnessLogic) {
+        room.logic.noteExpired(preTick.participantId, now);
+      }
+    }
     const decision = room.logic.decide(room.book, now);
     if (decision.kind === 'grant') {
       const grant = room.book.offerGrant(decision.bidId, decision.bidRevision, now + decision.leaseMs, now);

@@ -41,32 +41,42 @@ bands of RFC §1, kept apart so speech never hides control traffic).
 |---|---|---|
 | S1 three talkative bots | §10 gate 2 (fluid room, no starvation) | ✓ orderly turns |
 | S2 prepared + heckler | §10 gate 4 (zero-think emit, stale-head decline) | ✓ both paths |
-| S3 unresponsive holder | lease expiry / grant-before-cost | ✓ reproduces FINDING-1 |
-| S4 rude participant | voluntary compliance §1, §7 evidence | ✓ logged, floor continues |
+| S3 unresponsive holder | lease expiry / FINDING-1 regression | ✓ fails on pre-patch code |
+| S4 rude participant | voluntary compliance §1, §7 evidence + floor/idle liveness | ✓ logged, floor continues |
 | chaired Session-1 re-run | §10 gate 1 | needs live humans — not scripted |
 | voice | §10 gate 3 | blocked: voice-kit/voice-registry repos + keys |
 
-## What has already shaken out (loopback runs, 2026-08-11)
+## Findings (loopback runs, 2026-08-11) — status after Mica's red pen
 
-1. **FINDING-1 — dead bidder captures the floor.** Tick-expired grants
-   never reach the fairness logic's held-history (`noteTerminal` fires
-   only on release/decline). The expired bid reopens still ranked
-   "never held", wins every re-arbitration, and starves live
-   participants — S3 shows 9 straight expiries and zero turns for the
-   healthy bot. Fix belongs in the reference service (feed expiry into
-   fairness history, and/or strike-out repeatedly-expired bids); S3 is
-   the regression test in waiting.
+All three surfaced before the rig ever touched the relay. Rulings by Mica
+(#architecture, 2026-08-11); 1 and 3 patched in the reference service
+**before any live participant**, per her call, with conformance tests
+named for them.
+
+1. **FINDING-1 — dead bidder captures the floor.** *(PATCHED)* Tick-expired
+   grants never reached the fairness logic's held-history; the reopened bid
+   stayed ranked "never held" and starved live participants (originally: 9
+   straight expiries, zero turns for the healthy bot). Now: an expiry
+   charges held-history AND accrues a strike — backoff doubles per
+   consecutive expiry, bounded by `expiryBackoffCapMs`; any responsive
+   terminal clears strikes. S3 + two conformance tests are the fail-on-old
+   regressions.
 2. **FINDING-2 — speech-triggered rebidding deadlocks a quiet room.**
-   If every participant bids only in reaction to speech, the room can go
-   silent with no open bids and stay silent forever. A floor-exempt human
-   nudge breaks it. Protocol question: standing bids, idle
-   re-arbitration, or explicitly a participant-client concern?
-3. **FINDING-3 — untracked duplicate bids are zombies.** The op-echo
-   window (send `bid` → see `bid/accepted`) invites double-bidding;
-   the older bid stays open, gets granted, expires, reopens — FINDING-1's
-   loop triggered client-side. The market analogy allows multiple open
-   bids per participant, but the RFC is silent on whether the book should
-   dedupe/merge per participant. Poll-latency agents *will* hit this.
+   *(RIG-LEVEL PRIMITIVE, protocol placement = trial question)* Purely
+   reactive clients make silence absorbing, so liveness can't be left to
+   participants alone. The host now emits a **logged `floor/idle` event**
+   after a bounded quiet lease (failed grant→expire cycles do NOT count as
+   activity, and an open-but-backed-off bid does not veto idleness — an
+   idle floor with a stuck book is still idle). Scripted bots treat it as
+   a bid opportunity; no human nudge is load-bearing anywhere. The live
+   trial should compare idle-event wakes vs standing bids.
+3. **FINDING-3 — untracked duplicate bids are zombies.** *(PATCHED)* A
+   speaking floor is not an order book: one identity cannot consume two
+   concurrent turns. `createBid` now REPLACES a participant's existing
+   open/stale bid under the stable original `bidId` (revision bump,
+   `bid/replaced` ledger event); rebidding while holding a granted bid is
+   refused. Distinct concurrent proposals become an explicit future
+   feature, never an accident.
 4. Also observed, working as designed: a held floor means only
    floor-exempt speakers (humans) can stale a prepared head — barge-in
    pressure on the fast path comes from outside the contract, not inside.
