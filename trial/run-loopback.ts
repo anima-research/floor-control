@@ -162,6 +162,39 @@ const scenarios: Scenario[] = [
   },
 ];
 
+scenarios.push({
+  name: 'S5 genuinely quiet room — floor/idle fires once per quiet epoch, re-arms only on logged liveness transition',
+  gate: 'FINDING-2 invariant (Mica): liveness primitive must not become a periodic wake source',
+  async run() {
+    const { bus, host, bots } = rig({
+      leaseMs: 1000,
+      bots: [1, 2].map((i) => ({ name: `bot-${i}`, profile: 'talkative' as const, maxTurns: 1, thinkMs: 30 })),
+    });
+    host.start();
+    for (const b of bots) await b.start();
+    await sleep(100);
+    bus.post('ra-human', 'ra-human', 'room', 'seed: say your piece.');
+    await until(() => bots.every((b) => b.turnsTaken >= 1), 10_000);
+    // Both bots are done (maxTurns=1, they ignore idle events): the room is
+    // genuinely quiet. Across ~4 idle periods there must be exactly ONE
+    // floor/idle emission — then silence, disarmed.
+    const before = host.idleEmissions;
+    await sleep(5000);
+    const oneEpoch = host.idleEmissions - before === 1;
+    // A liveness transition (human speech) re-arms with a logged cause, and
+    // the next quiet epoch earns exactly one more emission.
+    bus.post('ra-human', 'ra-human', 'room', 'back for a moment.');
+    await sleep(2500);
+    const rearmed = host.idleRearms.some((r) => r.cause === 'speech');
+    const secondEpoch = host.idleEmissions - before === 2;
+    host.stop();
+    return {
+      pass: oneEpoch && rearmed && secondEpoch,
+      detail: `emissionsFirstQuiet=+${oneEpoch ? 1 : host.idleEmissions - before} rearmCauses=${JSON.stringify(host.idleRearms.map((r) => r.cause))} total=${host.idleEmissions}`,
+    };
+  },
+});
+
 const results: Array<{ name: string; gate: string; pass: boolean; detail: string }> = [];
 for (const s of scenarios) {
   process.stdout.write(`\n▶ ${s.name}\n`);

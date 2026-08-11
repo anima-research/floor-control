@@ -365,3 +365,25 @@ describe('one open bid per participant (FINDING-3, ruling 2026-08-11)', () => {
     );
   });
 });
+
+describe('bid replacement preserves queue age (ruling 2026-08-11)', () => {
+  it('editing a pending turn does not forfeit queue position, and cannot alter an accepted grant', () => {
+    const room = fluidRoom(svc);
+    bid(room.book, 'early', 'b1', T0 + 1);
+    bid(room.book, 'late', 'b2', T0 + 2);
+    // early edits its pending turn well after late arrived…
+    const replaced = room.book.createBid(
+      { participantId: 'early', bidId: 'b3', readinessKind: 'prepared', subjectRef: 'm4', createdAt: T0 + 3, expiresAt: null },
+      T0 + 3,
+    );
+    assert.equal(replaced.createdAt, T0 + 1, 'replacement keeps the original queue timestamp');
+    // …and still wins the never-held tie-break on original arrival order.
+    const g = svc.arbitrate(room.roomId, T0 + 4).grant;
+    assert.equal(g?.participantId, 'early', 'edits do not send you to the back of the queue');
+    // Stale authority is impossible from here: the grant binds this exact
+    // revision (see "grants bind the exact bid revision they answer") and a
+    // granted bid can be neither replaced (see "rebidding while holding a
+    // granted bid is refused") nor amended.
+    assert.throws(() => room.book.amendBid('b1', { subjectRef: 'm9' }, T0 + 5), /only open\/stale bids amend/);
+  });
+});

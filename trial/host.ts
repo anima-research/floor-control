@@ -40,7 +40,15 @@ export class FloorRoomHost {
   private lastSeq = 0;
   private lastRoomMessageId: string | null = null;
   private lastActivityAt = Date.now();
+  private lastActivityCause = 'startup';
   private lastIdleAt = 0;
+  /** floor/idle fires ONCE per quiet epoch, then disarms; it re-arms only on
+   *  an actual liveness transition (speech, book activity), with the cause
+   *  recorded — a genuinely quiet room must not get a periodic wake source
+   *  out of its liveness primitive (Mica, 2026-08-11). */
+  private idleArmed = true;
+  idleEmissions = 0;
+  readonly idleRearms: Array<{ at: number; cause: string }> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   readonly violations: Array<{ at: number; participantId: string; messageId: string }> = [];
 
@@ -85,6 +93,7 @@ export class FloorRoomHost {
     if (m.surface === 'room') {
       this.lastRoomMessageId = m.messageId;
       this.lastActivityAt = m.at;
+      this.lastActivityCause = 'speech';
       this.audit(m);
       this.pump();
       return;
@@ -204,11 +213,23 @@ export class FloorRoomHost {
     // grantable bid existed, this pump's arbitrate would have granted it and
     // liveGrant would be set. An idle floor with a stuck book is still idle.
     if (this.book.liveGrant) return;
+    if (!this.idleArmed) {
+      // Disarmed after emitting: only a liveness transition re-arms, and the
+      // cause goes in the ledger.
+      if (this.lastActivityAt > this.lastIdleAt) {
+        this.idleArmed = true;
+        this.idleRearms.push({ at: now, cause: this.lastActivityCause });
+        this.ledger({ kind: 'idle-rearm', at: now, cause: this.lastActivityCause });
+      }
+      return;
+    }
     if (now - Math.max(this.lastActivityAt, this.lastIdleAt) < idleAfter) return;
     this.lastIdleAt = now;
+    this.idleArmed = false;
+    this.idleEmissions += 1;
     this.ledger({ kind: 'idle', at: now, quietMs: now - this.lastActivityAt });
     void this.transport.sendControl(
-      eventLine('floor/idle', { quietMs: now - this.lastActivityAt, openBids: 0, holder: 'none' }),
+      eventLine('floor/idle', { quietMs: now - this.lastActivityAt, holder: 'none' }),
     );
   }
 
@@ -222,6 +243,7 @@ export class FloorRoomHost {
       // open-floor to standing-ready participants).
       if (e.type !== 'grant/offered' && e.type !== 'grant/expired') {
         this.lastActivityAt = e.at;
+        this.lastActivityCause = e.type;
       }
       this.ledger({ kind: 'event', ...e });
       const mention =

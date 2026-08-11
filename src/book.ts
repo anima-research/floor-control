@@ -90,7 +90,13 @@ export class FloorBook {
    *  one is already open/stale REPLACES it under the existing stable bidId
    *  (revision bump, `bid/replaced` in the ledger). Distinct concurrent
    *  proposals per participant would be an explicit future feature, never an
-   *  accident. (Trial FINDING-3; ruling by Mica 2026-08-11.) */
+   *  accident. (Trial FINDING-3; ruling by Mica 2026-08-11.)
+   *
+   *  Fairness timestamp: replacement PRESERVES the original createdAt —
+   *  editing a pending turn does not send you to the back of the queue.
+   *  Revision churn cannot parlay that age into stale authority because a
+   *  grant binds the exact revision it answers (offerGrant refuses any
+   *  other) and a granted bid cannot be replaced or amended at all. */
   createBid(
     env: Omit<BidEnvelope, 'roomId' | 'logicEpoch' | 'contractDigest' | 'revision'>,
     now: number,
