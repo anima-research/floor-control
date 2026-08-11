@@ -9,6 +9,7 @@
     "test": "node --import tsx --test test/*.test.ts"
   },
   "devDependencies": {
+    "@animalabs/portal-client": "^0.4.1",
     "@types/node": "^20.0.0",
     "tsx": "^4.7.0",
     "typescript": "^5.5.0"
