@@ -47,9 +47,17 @@ appendFileSync(
   }) + '\n',
 );
 
+// A stray rejection (relay hiccup, RPC timeout) is ledgered and survived —
+// the arbiter process is the room's epoch; it dies on purpose or not at all.
+process.on('unhandledRejection', (err) => {
+  appendFileSync(ledgerPath, JSON.stringify({ kind: 'error', at: Date.now(), error: String(err) }) + '\n');
+  console.error('unhandled rejection (survived):', err);
+});
+
 const hostTransport = new PortalTransport({
   url: rig.url,
   credsFile: 'trial/creds/floor-service.creds.json',
+  personaName: 'floor-service',
   roomChannelId: rig.roomChannelId,
   controlThreadId: rig.controlThreadId,
 });
@@ -67,6 +75,7 @@ for (let i = 1; i <= botCount; i++) {
   const t = new PortalTransport({
     url: rig.url,
     credsFile: `trial/creds/${name}.creds.json`,
+    personaName: name,
     roomChannelId: rig.roomChannelId,
     controlThreadId: rig.controlThreadId,
   });
