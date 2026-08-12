@@ -25,6 +25,11 @@ function arg(name: string, fallback: string): string {
 const rig = JSON.parse(readFileSync(arg('rig', 'trial/rig.json'), 'utf8'));
 const leaseMs = parseDuration(arg('lease', '30s')) ?? 30_000;
 const botCount = Number(arg('bots', '2'));
+// Two reactive bots sustain each other indefinitely (~4s/turn observed live)
+// — unattended, that's thousands of messages against the relay. Scripted
+// turns are budgeted; the host itself keeps arbitrating for live
+// participants after the bots go quiet.
+const maxTurns = Number(arg('max-turns', '25'));
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 
 // The ledger opens with a manifest naming the exact code under trial —
@@ -85,6 +90,7 @@ for (let i = 1; i <= botCount; i++) {
     profile: i === 1 ? 'prepared' : 'talkative',
     thinkMs: 2000,
     reactMs: 500,
+    maxTurns,
   });
   await bot.start();
   bots.push(bot);
