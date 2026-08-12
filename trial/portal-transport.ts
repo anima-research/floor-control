@@ -73,7 +73,18 @@ export class PortalTransport implements RoomTransport {
       if (author.bot === true && (author.username === this.opts.personaName || author.displayName === this.opts.personaName)) {
         return;
       }
-      const authorId = author.kind === 'persona' ? `persona:${author.personaId}` : `user:${author.userId}`;
+      // Identity, third relay reality: ONE webhook serves the whole channel,
+      // so webhook userId is per-CHANNEL, not per-persona — using it collapsed
+      // every persona into a single participant (first live ledger, grants
+      // g1–g5). For webhook echoes the only per-persona field the relay
+      // delivers is the display name it stamps from the persona record; use
+      // it, and flag the caveat until deliveries carry personaId.
+      const authorId =
+        author.kind === 'persona'
+          ? `persona:${author.personaId}`
+          : author.bot
+            ? `webhook:${author.username ?? author.displayName}`
+            : `user:${author.userId}`;
       const text = m.content ?? '';
       const surface = CONTROL_PREFIXES.some((p) => text.startsWith(p)) ? ('control' as const) : ('room' as const);
       const msg: InboundMessage = {
