@@ -10,6 +10,10 @@
  *     --creds ~/.portal/weft.creds.json \
  *     --room <channelId> --guild <guildId> \
  *     --bots 3 --out trial/rig.json
+ *
+ * With an operator-provided MULTIUSE invite (antra's flow, 2026-08-11),
+ * pass --invite <code>: every persona enrolls through that one code and no
+ * mint_invite call is made — the deploy-state question dissolves.
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -28,6 +32,7 @@ const roomChannelId = arg('room');
 const guildId = arg('guild');
 const botCount = Number(arg('bots', '3'));
 const out = arg('out', 'trial/rig.json');
+const sharedInvite = arg('invite', '');
 
 const creds = JSON.parse(readFileSync(credsFile, 'utf8'));
 const client = new PortalClient({ url, token: creds.token, personaId: creds.personaId });
@@ -41,18 +46,23 @@ mkdirSync('trial/creds', { recursive: true });
 const names = ['floor-service', ...Array.from({ length: botCount }, (_, i) => `trial-bot-${i + 1}`)];
 const personas: Record<string, string> = {};
 for (const name of names) {
-  // mint_invite landed in portal PR #15 (2026-08-06); published
-  // @animalabs/portal-client 0.4.1 predates its types (portal#12 lag), so
-  // the call goes through untyped until the next protocol release.
-  const invite = (await client.call('mint_invite' as never, {
-    guildId,
-    grant: {
-      caps: ['VIEW_CHANNEL', 'READ_HISTORY', 'SEND_MESSAGES', 'SEND_IN_THREADS'],
-      scope: { channels: [roomChannelId] },
-    },
-    label: `floor-trial:${name}`,
-  } as never)) as { code: string; expiresAt: string };
-  const minted = await enroll({ url, invite: invite.code, desiredName: name });
+  let code = sharedInvite;
+  if (!code) {
+    // Self-mint fallback. mint_invite landed in portal PR #15 (2026-08-06);
+    // published @animalabs/portal-client 0.4.1 predates its types
+    // (portal#12 lag), so the call goes through untyped until the next
+    // protocol release — and needs the RPC deployed server-side.
+    const invite = (await client.call('mint_invite' as never, {
+      guildId,
+      grant: {
+        caps: ['VIEW_CHANNEL', 'READ_HISTORY', 'SEND_MESSAGES', 'SEND_IN_THREADS'],
+        scope: { channels: [roomChannelId] },
+      },
+      label: `floor-trial:${name}`,
+    } as never)) as { code: string; expiresAt: string };
+    code = invite.code;
+  }
+  const minted = await enroll({ url, invite: code, desiredName: name });
   const file = `trial/creds/${name}.creds.json`;
   writeFileSync(file, JSON.stringify(minted, null, 2));
   personas[name] = minted.personaId;

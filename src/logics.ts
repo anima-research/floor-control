@@ -108,17 +108,29 @@ export class FluidFairnessLogic implements Logic {
     if (book.liveGrant) return { kind: 'hold', reason: 'floor occupied' };
     const open = book.openBids();
     if (open.length === 0) return { kind: 'hold', reason: 'no open bids' };
-    const ready = open.filter((b) => this.eligible(b.participantId, now));
-    if (ready.length === 0) return { kind: 'hold', reason: 'all open bids in expiry backoff' };
+    // Expiry backoff DOWNRANKS (antra 2026-08-11: "downrank them for the
+    // next few rounds"): in any contested round a struck bidder loses to
+    // every eligible competitor. When even the round's best bid is in
+    // backoff (a solo unresponsive bidder), the round HOLDS for the bounded
+    // cooldown instead of granting — immediate regrant would churn
+    // grant/expire cycles at a non-responder and keep the floor nominally
+    // occupied, suppressing the open-floor idle signal standing-ready
+    // participants depend on.
     const pick = (candidates: Bid[]): Bid =>
       candidates.slice().sort((a, b) => {
+        const ea = this.eligible(a.participantId, now) ? 0 : 1;
+        const eb = this.eligible(b.participantId, now) ? 0 : 1;
+        if (ea !== eb) return ea - eb; // eligible before backed-off
         const ha = this.lastHeld.get(a.participantId) ?? -1;
         const hb = this.lastHeld.get(b.participantId) ?? -1;
         if (ha !== hb) return ha - hb; // least-recently-held first; never-held (-1) wins
         return a.createdAt - b.createdAt; // then arrival order
       })[0];
-    const urgent = ready.filter((b) => b.readinessKind === 'urgent');
-    const chosen = urgent.length > 0 ? pick(urgent) : pick(ready);
+    const urgent = open.filter((b) => b.readinessKind === 'urgent');
+    const chosen = urgent.length > 0 ? pick(urgent) : pick(open);
+    if (!this.eligible(chosen.participantId, now)) {
+      return { kind: 'hold', reason: 'best bid cooling down after lease expiry' };
+    }
     return { kind: 'grant', bidId: chosen.bidId, bidRevision: chosen.revision, leaseMs: this.leaseMs };
   }
 }

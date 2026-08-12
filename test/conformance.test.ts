@@ -305,7 +305,7 @@ describe('contract digests', () => {
 });
 
 describe('an expired lease charges fairness history (FINDING-1, ruling 2026-08-11)', () => {
-  it('after expiry the other bidder is granted; the expired holder is backed off, then eligible again', () => {
+  it('after expiry the other bidder is granted; backoff downranks but never excludes', () => {
     const room = fluidRoom(svc); // leaseMs 10_000 → backoff 20_000, cap 80_000
     bid(room.book, 'sleeper', 'b1', T0 + 1);
     bid(room.book, 'alive', 'b2', T0 + 2);
@@ -316,12 +316,19 @@ describe('an expired lease charges fairness history (FINDING-1, ruling 2026-08-1
     assert.equal(room.book.receiptFor(g1!.grantId)?.terminal, 'expired');
     assert.equal(after.grant?.participantId, 'alive', 'expiry must not leave the sleeper "never held"');
     svc.release(room.roomId, after.grant!.grantId, T0 + 21_000);
-    // Sleeper's reopened bid stays ineligible during backoff even with the floor free…
-    const during = svc.arbitrate(room.roomId, T0 + 25_000);
-    assert.equal(during.decision.kind, 'hold', 'sleeper is in expiry backoff');
-    // …and becomes eligible again once the (bounded) backoff has elapsed.
+    // Downrank (antra): while backed off, the sleeper loses to ANY eligible
+    // competitor — even one who held the floor more recently…
+    bid(room.book, 'alive', 'b3', T0 + 22_000);
+    const contested = svc.arbitrate(room.roomId, T0 + 23_000);
+    assert.equal(contested.grant?.participantId, 'alive', 'backed-off bidder loses every contested round');
+    svc.release(room.roomId, contested.grant!.grantId, T0 + 24_000);
+    // …alone in the book during the bounded cooldown, the round holds
+    // (immediate regrant would churn grant/expire at a non-responder)…
+    const solo = svc.arbitrate(room.roomId, T0 + 25_000);
+    assert.equal(solo.decision.kind, 'hold', 'solo backed-off bid cools down instead of churning');
+    // …and once the cooldown elapses, the sleeper is granted again.
     const revived = svc.arbitrate(room.roomId, T0 + 20_000 + 20_001);
-    assert.equal(revived.grant?.participantId, 'sleeper');
+    assert.equal(revived.grant?.participantId, 'sleeper', 'bounded: retry after cooldown, not never');
   });
 
   it('a responsive terminal clears strikes', () => {
