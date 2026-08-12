@@ -14,6 +14,10 @@ export interface InboundMessage {
   messageId: string;
   text: string;
   at: number;
+  /** Raw transport-level author fields, preserved beside the derived
+   *  identity (Mica: display-name identity is a temporary compatibility
+   *  key — the ledger must keep the underlying facts). */
+  raw?: Record<string, unknown>;
 }
 
 export interface RoomTransport {

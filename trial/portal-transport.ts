@@ -33,6 +33,9 @@ export interface PortalTransportOptions {
   /** Thread for outgoing control traffic (readability); inbound
    *  classification is syntactic, not thread-based. */
   controlThreadId?: string;
+  /** Receives anomaly records (identity refusals, send drops) so the run
+   *  can ledger them — a drop that only reaches a console is not a receipt. */
+  onAnomaly?: (entry: Record<string, unknown>) => void;
 }
 
 const CONTROL_PREFIXES = ['!floor', '⟨floor⟩'];
@@ -43,6 +46,11 @@ export class PortalTransport implements RoomTransport {
   private client: PortalClient;
   private handlers: Array<(m: InboundMessage) => void> = [];
   private sentIds = new Set<string>();
+  /** Derived participantId → first-seen raw fingerprint. Name-keyed identity
+   *  is only tolerable while it is COLLISION-REFUSING: the same derived id
+   *  arriving with a different underlying shape is dropped and reported,
+   *  never silently merged (Mica's caution; portal#18 is the real fix). */
+  private fingerprints = new Map<string, string>();
 
   constructor(private opts: PortalTransportOptions) {
     const creds = JSON.parse(readFileSync(opts.credsFile, 'utf8')) as {
@@ -85,6 +93,23 @@ export class PortalTransport implements RoomTransport {
           : author.bot
             ? `webhook:${author.username ?? author.displayName}`
             : `user:${author.userId}`;
+      const raw = {
+        relayMessageId: m.id,
+        kind: author.kind,
+        userId: author.userId,
+        personaId: author.personaId,
+        username: author.username,
+        displayName: author.displayName,
+        bot: author.bot,
+      };
+      const fp = `${author.kind}|${author.bot ? 'bot' : 'user'}|${author.kind === 'user' && !author.bot ? author.userId : ''}`;
+      const seen = this.fingerprints.get(authorId);
+      if (seen === undefined) {
+        this.fingerprints.set(authorId, fp);
+      } else if (seen !== fp) {
+        this.opts.onAnomaly?.({ kind: 'identity-refusal', at: Date.now(), authorId, expected: seen, got: fp, raw });
+        return; // explicit refusal, never a silent merge
+      }
       const text = m.content ?? '';
       const surface = CONTROL_PREFIXES.some((p) => text.startsWith(p)) ? ('control' as const) : ('room' as const);
       const msg: InboundMessage = {
@@ -94,6 +119,7 @@ export class PortalTransport implements RoomTransport {
         messageId: m.nativeId,
         text,
         at: Date.parse(m.createdAt),
+        raw,
       };
       this.handlers.forEach((h) => {
         try {
@@ -138,6 +164,13 @@ export class PortalTransport implements RoomTransport {
       } catch (err) {
         if (attempt === 2) {
           console.error(`[portal-transport ${this.opts.personaName}] send failed twice, dropping:`, (err as Error).message);
+          this.opts.onAnomaly?.({
+            kind: 'send-drop',
+            at: Date.now(),
+            persona: this.opts.personaName,
+            error: (err as Error).message,
+            contentPreview: String((params as { content?: string }).content ?? '').slice(0, 80),
+          });
           return '';
         }
         await new Promise((r) => setTimeout(r, 2000));

@@ -100,7 +100,7 @@ export class FloorRoomHost {
     }
     const op = parseOp(m.text);
     if (!op) return; // ordinary chatter in the control thread
-    this.ledger({ kind: 'op', at: m.at, participantId: m.authorId, op: op.verb, id: op.id, args: op.args });
+    this.ledger({ kind: 'op', at: m.at, participantId: m.authorId, op: op.verb, id: op.id, args: op.args, raw: m.raw });
     try {
       this.apply(op, m);
     } catch (err) {
@@ -191,7 +191,7 @@ export class FloorRoomHost {
     const holder = this.book.liveGrant;
     if (holder && holder.participantId === m.authorId) return;
     this.violations.push({ at: m.at, participantId: m.authorId, messageId: m.messageId });
-    this.ledger({ kind: 'violation', at: m.at, participantId: m.authorId, messageId: m.messageId });
+    this.ledger({ kind: 'violation', at: m.at, participantId: m.authorId, messageId: m.messageId, raw: m.raw });
     void this.transport.sendControl(
       eventLine('violation', { participant: m.authorName, messageId: m.messageId, holder: holder?.participantId ?? 'none' }),
     );

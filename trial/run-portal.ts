@@ -59,12 +59,16 @@ process.on('unhandledRejection', (err) => {
   console.error('unhandled rejection (survived):', err);
 });
 
+const ledgerAnomaly = (entry: Record<string, unknown>) =>
+  appendFileSync(ledgerPath, JSON.stringify(entry) + '\n');
+
 const hostTransport = new PortalTransport({
   url: rig.url,
   credsFile: 'trial/creds/floor-service.creds.json',
   personaName: 'floor-service',
   roomChannelId: rig.roomChannelId,
   controlThreadId: rig.controlThreadId,
+  onAnomaly: ledgerAnomaly,
 });
 await hostTransport.connect();
 const host = new FloorRoomHost(hostTransport, new FluidFairnessLogic({ leaseMs }), {
@@ -83,6 +87,7 @@ for (let i = 1; i <= botCount; i++) {
     personaName: name,
     roomChannelId: rig.roomChannelId,
     controlThreadId: rig.controlThreadId,
+    onAnomaly: ledgerAnomaly,
   });
   await t.connect();
   const bot = new ScriptedBot(t, `persona:${rig.personas[name]}`, {

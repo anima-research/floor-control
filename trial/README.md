@@ -100,6 +100,31 @@ does the control-thread band stay readable at real message rates; do
 `floor:*` event lines work as wake-gate inputs; where does the two-band
 split chafe.
 
+## Trial adapters, explicitly temporary (Mica's cautions, 2026-08-11)
+
+Two live-relay workarounds are compatibility keys, not protocol:
+
+- **Display-name identity.** The relay delivers persona sends as webhook
+  users sharing one per-channel userId (portal#18), so webhook authors are
+  keyed on the relay-stamped display name. This stays tolerable only
+  because it is collision-refusing: the raw relay author fields are
+  recorded beside every derived participantId in the ledger, and a derived
+  id arriving with a different underlying fingerprint is dropped with an
+  `identity-refusal` record — never silently merged. portal#18 (deliveries
+  carry personaId) is the real fix.
+- **Syntax-classified bands.** `threadId` is absent on delivery
+  (portal#17), so any line starting `!floor` or `⟨floor⟩` is control
+  traffic wherever it appears; there is no escape sequence. Ordinary
+  speech that needs to quote an op should prefix it (e.g. `> !floor bid …`
+  or backticks). A `!floor` line with an unknown verb parses to nothing
+  and is inert on BOTH bands — swallowed, not spoken. portal#17 is the
+  real fix.
+
+Send semantics: retry once, then log-and-drop — acceptable only because
+every drop lands in the ledger (`send-drop`) and the arbiter survives. A
+send attempt is never reported as an applied floor action; the book's own
+event is the only receipt.
+
 ## Deliberately not here
 
 - No WS/HTTP service API yet — the message band is the trial transport;
