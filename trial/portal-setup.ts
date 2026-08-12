@@ -1,19 +1,20 @@
 /**
- * One-shot live-rig bootstrap. Run as an existing persona (e.g. Weft) with
- * caps on the trial room channel; it mints single-use invites (subset of the
- * minter's caps, mint_invite RPC), enrolls the floor-service persona + N
- * scripted bots, creates the control thread, and writes a rig.json the run
- * scripts consume. Nothing here touches channels beyond the one you name.
+ * One-shot live-rig bootstrap.
+ *
+ * Operator-invite flow (antra's, 2026-08-11): pass --invite <code> — every
+ * trial persona (floor-service + N bots) enrolls through that one multiuse
+ * code; the control thread is then created BY the floor-service persona
+ * (whose invite caps cover the trial channel), so no pre-existing persona
+ * needs access there. No mint_invite call is made on this path.
  *
  *   npx tsx trial/portal-setup.ts \
- *     --url wss://portal.animalabs.ai \
- *     --creds ~/.portal/weft.creds.json \
  *     --room <channelId> --guild <guildId> \
- *     --bots 3 --out trial/rig.json
+ *     --invite <code> --bots 3 --out trial/rig.json
  *
- * With an operator-provided MULTIUSE invite (antra's flow, 2026-08-11),
- * pass --invite <code>: every persona enrolls through that one code and no
- * mint_invite call is made — the deploy-state question dissolves.
+ * Self-mint fallback (no --invite): connects as --creds and mints single-use
+ * channel-scoped invites via mint_invite (portal PR #15; needs the RPC
+ * deployed server-side, and the published client 0.4.1 predates its types —
+ * calls go through untyped until the next protocol release).
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -27,52 +28,50 @@ function arg(name: string, fallback?: string): string {
 }
 
 const url = arg('url', 'wss://portal.animalabs.ai');
-const credsFile = arg('creds').replace(/^~/, process.env.HOME ?? '~');
 const roomChannelId = arg('room');
 const guildId = arg('guild');
 const botCount = Number(arg('bots', '3'));
 const out = arg('out', 'trial/rig.json');
 const sharedInvite = arg('invite', '');
 
-const creds = JSON.parse(readFileSync(credsFile, 'utf8'));
-const client = new PortalClient({ url, token: creds.token, personaId: creds.personaId });
-await client.connect();
-
-const thread = await client.call('create_thread', { channelId: roomChannelId, name: 'floor-control' });
-const controlThreadId = thread.channel.id;
-console.log(`control thread: ${controlThreadId}`);
-
 mkdirSync('trial/creds', { recursive: true });
 const names = ['floor-service', ...Array.from({ length: botCount }, (_, i) => `trial-bot-${i + 1}`)];
 const personas: Record<string, string> = {};
+
+async function inviteCodeFor(name: string): Promise<string> {
+  if (sharedInvite) return sharedInvite;
+  const credsFile = arg('creds').replace(/^~/, process.env.HOME ?? '~');
+  const creds = JSON.parse(readFileSync(credsFile, 'utf8'));
+  const minter = new PortalClient({ url, token: creds.token, personaId: creds.personaId });
+  await minter.connect();
+  const invite = (await minter.call('mint_invite' as never, {
+    guildId,
+    grant: {
+      caps: ['VIEW_CHANNEL', 'READ_HISTORY', 'SEND_MESSAGES', 'SEND_IN_THREADS'],
+      scope: { channels: [roomChannelId] },
+    },
+    label: `floor-trial:${name}`,
+  } as never)) as { code: string };
+  minter.close?.();
+  return invite.code;
+}
+
 for (const name of names) {
-  let code = sharedInvite;
-  if (!code) {
-    // Self-mint fallback. mint_invite landed in portal PR #15 (2026-08-06);
-    // published @animalabs/portal-client 0.4.1 predates its types
-    // (portal#12 lag), so the call goes through untyped until the next
-    // protocol release — and needs the RPC deployed server-side.
-    const invite = (await client.call('mint_invite' as never, {
-      guildId,
-      grant: {
-        caps: ['VIEW_CHANNEL', 'READ_HISTORY', 'SEND_MESSAGES', 'SEND_IN_THREADS'],
-        scope: { channels: [roomChannelId] },
-      },
-      label: `floor-trial:${name}`,
-    } as never)) as { code: string; expiresAt: string };
-    code = invite.code;
-  }
-  const minted = await enroll({ url, invite: code, desiredName: name });
-  const file = `trial/creds/${name}.creds.json`;
-  writeFileSync(file, JSON.stringify(minted, null, 2));
+  const minted = await enroll({ url, invite: await inviteCodeFor(name), desiredName: name });
+  writeFileSync(`trial/creds/${name}.creds.json`, JSON.stringify(minted, null, 2));
   personas[name] = minted.personaId;
   console.log(`enrolled ${name} → ${minted.personaId}`);
 }
 
-writeFileSync(
-  out,
-  JSON.stringify({ url, roomChannelId, controlThreadId, guildId, personas }, null, 2),
-);
+// The floor-service persona owns its control surface: it creates the thread.
+const svcCreds = JSON.parse(readFileSync('trial/creds/floor-service.creds.json', 'utf8'));
+const svc = new PortalClient({ url, token: svcCreds.token, personaId: svcCreds.personaId, subscriptions: [roomChannelId] });
+await svc.connect();
+const thread = await svc.call('create_thread', { channelId: roomChannelId, name: 'floor-control' });
+const controlThreadId = thread.channel.id;
+console.log(`control thread: ${controlThreadId}`);
+svc.close?.();
+
+writeFileSync(out, JSON.stringify({ url, roomChannelId, controlThreadId, guildId, personas }, null, 2));
 console.log(`rig config → ${out}`);
-client.close?.();
 process.exit(0);
