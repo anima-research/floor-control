@@ -9,7 +9,8 @@
  * Stop with ctrl-C; the ledger (trial/runs/<stamp>.jsonl) survives.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, appendFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { FluidFairnessLogic } from '../src/logics.js';
 import { FloorRoomHost } from './host.js';
 import { ScriptedBot } from './bot.js';
@@ -26,6 +27,26 @@ const leaseMs = parseDuration(arg('lease', '30s')) ?? 30_000;
 const botCount = Number(arg('bots', '2'));
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 
+// The ledger opens with a manifest naming the exact code under trial —
+// a raw ledger without provenance is not a receipt (Mica, 2026-08-11).
+const ledgerPath = `trial/runs/${stamp}.jsonl`;
+mkdirSync('trial/runs', { recursive: true });
+const git = (cmd: string) => execSync(cmd, { encoding: 'utf8' }).trim();
+appendFileSync(
+  ledgerPath,
+  JSON.stringify({
+    kind: 'manifest',
+    at: Date.now(),
+    branch: git('git rev-parse --abbrev-ref HEAD'),
+    head: git('git rev-parse HEAD'),
+    dirty: git('git status --porcelain') !== '',
+    roomChannelId: rig.roomChannelId,
+    controlThreadId: rig.controlThreadId,
+    leaseMs,
+    botCount,
+  }) + '\n',
+);
+
 const hostTransport = new PortalTransport({
   url: rig.url,
   credsFile: 'trial/creds/floor-service.creds.json',
@@ -35,7 +56,7 @@ const hostTransport = new PortalTransport({
 await hostTransport.connect();
 const host = new FloorRoomHost(hostTransport, new FluidFairnessLogic({ leaseMs }), {
   tickMs: 1000,
-  ledgerPath: `trial/runs/${stamp}.jsonl`,
+  ledgerPath,
 });
 host.start();
 console.log(`floor-service live: room=${rig.roomChannelId} control=${rig.controlThreadId} lease=${leaseMs}ms`);
