@@ -25,6 +25,10 @@ function arg(name: string, fallback: string): string {
 const rig = JSON.parse(readFileSync(arg('rig', 'trial/rig.json'), 'utf8'));
 const leaseMs = parseDuration(arg('lease', '30s')) ?? 30_000;
 const botCount = Number(arg('bots', '2'));
+// Per-bot behavior profiles, comma-separated, assigned by bot index. The
+// default reproduces the original two-bot shape exactly; extra bots beyond
+// the list fall back to 'talkative'. e.g. --profiles talkative,slow,rude
+const profiles = arg('profiles', 'prepared,talkative').split(',').map((p) => p.trim());
 // Two reactive bots sustain each other indefinitely (~4s/turn observed live)
 // — unattended, that's thousands of messages against the relay. Scripted
 // turns are budgeted; the host itself keeps arbitrating for live
@@ -49,6 +53,7 @@ appendFileSync(
     controlThreadId: rig.controlThreadId,
     leaseMs,
     botCount,
+    profiles: profiles.slice(0, botCount),
   }) + '\n',
 );
 
@@ -90,16 +95,17 @@ for (let i = 1; i <= botCount; i++) {
     onAnomaly: ledgerAnomaly,
   });
   await t.connect();
+  const profile = (profiles[i - 1] ?? 'talkative') as import('./bot.js').BotProfile;
   const bot = new ScriptedBot(t, `persona:${rig.personas[name]}`, {
     name,
-    profile: i === 1 ? 'prepared' : 'talkative',
+    profile,
     thinkMs: 2000,
     reactMs: 500,
     maxTurns,
   });
   await bot.start();
   bots.push(bot);
-  console.log(`${name} joined (${i === 1 ? 'prepared' : 'talkative'})`);
+  console.log(`${name} joined (${profile})`);
 }
 
 process.on('SIGINT', () => {
