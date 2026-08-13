@@ -29,6 +29,11 @@ const botCount = Number(arg('bots', '2'));
 // default reproduces the original two-bot shape exactly; extra bots beyond
 // the list fall back to 'talkative'. e.g. --profiles talkative,slow,rude
 const profiles = arg('profiles', 'prepared,talkative').split(',').map((p) => p.trim());
+// Quiet-lease before the one-shot floor/idle emission. 'off' disables the
+// emission entirely — the idle-event vs standing-bid comparison runs the
+// same room both ways and measures late-joiner recovery.
+const idleArg = arg('idle-after', '60s');
+const idleAfterMs = idleArg === 'off' ? Number.POSITIVE_INFINITY : (parseDuration(idleArg) ?? 60_000);
 // Two reactive bots sustain each other indefinitely (~4s/turn observed live)
 // — unattended, that's thousands of messages against the relay. Scripted
 // turns are budgeted; the host itself keeps arbitrating for live
@@ -54,6 +59,7 @@ appendFileSync(
     leaseMs,
     botCount,
     profiles: profiles.slice(0, botCount),
+    idleAfterMs: Number.isFinite(idleAfterMs) ? idleAfterMs : 'off',
   }) + '\n',
 );
 
@@ -79,6 +85,7 @@ await hostTransport.connect();
 const host = new FloorRoomHost(hostTransport, new FluidFairnessLogic({ leaseMs }), {
   tickMs: 1000,
   ledgerPath,
+  idleAfterMs,
 });
 host.start();
 console.log(`floor-service live: room=${rig.roomChannelId} control=${rig.controlThreadId} lease=${leaseMs}ms`);
