@@ -9,6 +9,9 @@
  *   npx tsx trial/run-loopback.ts
  */
 
+import { readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join as joinPath } from 'node:path';
 import { FluidFairnessLogic } from '../src/logics.js';
 import { FloorRoomHost } from './host.js';
 import { ScriptedBot, sleep, type BotOptions } from './bot.js';
@@ -24,7 +27,12 @@ function rig(opts: { leaseMs: number; bots: BotOptions[]; exemptIds?: string[]; 
   const bus = new LoopbackBus();
   const host = new FloorRoomHost(
     new LoopbackTransport(bus, 'floor-service', 'floor-service'),
-    new FluidFairnessLogic({ leaseMs: opts.leaseMs }),
+    // Loopback latencies are ~ms, so the offer accept-TTL rides the same
+    // fast clock as the speech lease (live defaults are relay-scale).
+    new FluidFairnessLogic({
+      speechLeaseMs: opts.leaseMs,
+      acceptTtlMs: { intent: opts.leaseMs, prepared: opts.leaseMs, urgent: opts.leaseMs, manual: opts.leaseMs },
+    }),
     {
       tickMs: 50,
       idleAfterMs: 1200,
@@ -127,7 +135,7 @@ const scenarios: Scenario[] = [
       bus.post('ra-human', 'ra-human', 'room', 'seed: anyone home?');
       await sleep(6000);
       host.stop();
-      const expired = host.book.eventLog().filter((e) => e.type === 'grant/expired').length;
+      const expired = host.book.eventLog().filter((e) => e.type === 'grant/offer-expired' || e.type === 'grant/lease-expired').length;
       // Pre-patch this starved `alive` behind nine straight sleeper expiries
       // (expiry never reached fairness history, the reopened bid stayed
       // "never held"). Patched: the expiry charges held-history + a strike
@@ -196,8 +204,8 @@ scenarios.push({
 });
 
 scenarios.push({
-  name: 'S6 late joiner after the one-shot idle fired — join is not a liveness transition, so no wake ever arrives (FINDING-7, documented gap)',
-  gate: 'idle-event vs standing-bid comparison: the participant who most needs the open-floor signal is the one who arrived after it fired',
+  name: 'S6 late joiner after the one-shot idle fired — join is a logged liveness transition; the newcomer receives a fresh floor/idle (FINDING-7 fix; discriminator 1)',
+  gate: 'Mica ruling 2026-08-13: an idle event emitted before a participant existed cannot count as notice to them; duplicate join processing is not a second wake',
   async run() {
     const { bus, host, bots } = rig({
       leaseMs: 1000,
@@ -212,30 +220,77 @@ scenarios.push({
     await until(() => host.idleEmissions >= 1, 5_000);
     const emissionsAtJoin = host.idleEmissions;
 
-    // NOW a poll-based participant joins the quiet room. Prediction from the
-    // code read: join updates no book state -> not a logged liveness
-    // transition -> the idle signal never re-arms -> no wake, no bid, no
-    // grant, across arbitrarily many idle periods.
+    // A poll-based participant joins the quiet room AFTER the emission.
+    // The join is a liveness transition: it re-arms the one-shot and begins
+    // a new quiet epoch, so a fresh floor/idle reaches the newcomer, who
+    // bids on it and takes the floor — no human nudge involved.
     const late = new ScriptedBot(new LoopbackTransport(bus, 'late-bot', 'late-bot'), 'late-bot', {
       name: 'late-bot', profile: 'talkative', maxTurns: 1, thinkMs: 30,
     });
+    const lateTransport = new LoopbackTransport(bus, 'late-bot', 'late-bot');
     await late.start();
-    await sleep(4000); // > 3 idle periods at idleAfterMs=1200
-    const stalled = late.turnsTaken === 0;
-    const noNewEmission = host.idleEmissions === emissionsAtJoin;
-    const noJoinRearm = !host.idleRearms.some((r) => r.at > 0 && r.cause.includes('join'));
-
-    // Contrast: the late bot is perfectly capable — one human utterance
-    // (a real liveness transition) and it bids and takes the floor. Only
-    // the signal was missing, not the participant.
-    bus.post('ra-human', 'ra-human', 'room', 'anyone here?');
-    const recovered = await until(() => late.turnsTaken >= 1, 8_000);
+    // Duplicate processing of the same join (relay redelivery): idempotent,
+    // never a second liveness transition.
+    await lateTransport.sendControl('!floor join');
+    const woke = await until(() => late.turnsTaken >= 1, 8_000);
+    const freshEmission = host.idleEmissions === emissionsAtJoin + 1;
+    const joinRearms = host.idleRearms.filter((r) => r.cause === 'participant/joined').length;
 
     host.stop();
     return {
-      pass: stalled && noNewEmission && noJoinRearm && recovered,
-      detail: `stalledAcrossIdlePeriods=${stalled} emissionsWhileStalled=+${host.idleEmissions - emissionsAtJoin} ` +
-        `recoveredOnRealSpeech=${recovered} rearmCauses=${JSON.stringify(host.idleRearms.map((r) => r.cause))}`,
+      pass: woke && freshEmission && joinRearms === 1,
+      detail: `wokeOnJoinRearmedIdle=${woke} emissionsAfterJoin=+${host.idleEmissions - emissionsAtJoin} ` +
+        `joinRearms=${joinRearms} (2 join sends -> 1 liveness transition) rearmCauses=${JSON.stringify(host.idleRearms.map((r) => r.cause))}`,
+    };
+  },
+});
+
+scenarios.push({
+  name: 'S7 suspend/resume — the clock gap is witnessed and every overdue offer reconciled before new speech is processed (host-sleep ruling; discriminator 9)',
+  gate: 'Mica ruling 2026-08-13: detect/log the gap, reconcile overdue state first, never represent a late expiry as punctual, preserve process identity',
+  async run() {
+    const ledgerPath = joinPath(tmpdir(), `floor-s7-${Date.now().toString(36)}.jsonl`);
+    const bus = new LoopbackBus();
+    const host = new FloorRoomHost(
+      new LoopbackTransport(bus, 'floor-service', 'floor-service'),
+      new FluidFairnessLogic({
+        speechLeaseMs: 1500,
+        acceptTtlMs: { intent: 800, prepared: 800, urgent: 800, manual: 800 },
+        expiryBackoffMs: 500,
+        expiryBackoffCapMs: 1000,
+      }),
+      { tickMs: 50, idleAfterMs: 60_000, clockGapThresholdMs: 400, exemptIds: ['ra-human'], ledgerPath },
+    );
+    const sleeper = new ScriptedBot(new LoopbackTransport(bus, 'sleeper', 'sleeper'), 'sleeper', {
+      name: 'sleeper', profile: 'slow', maxTurns: 5,
+    });
+    host.start();
+    await sleeper.start();
+    await sleep(100);
+    bus.post('ra-human', 'ra-human', 'room', 'seed.');
+    // The slow bot bids and is offered the floor (accept-TTL 800ms)…
+    await until(() => host.book.liveGrant !== null, 5_000);
+    // …then the host process "suspends": timers stop, the world moves on.
+    host.stop();
+    await sleep(1300); // > accept-TTL deadline AND > clockGapThresholdMs
+    // First thing on wake is inbound speech. The host must witness the gap
+    // and close the overdue offer BEFORE processing it.
+    bus.post('ra-human', 'ra-human', 'room', 'good morning, room.');
+    await sleep(300);
+
+    const rows = readFileSync(ledgerPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    rmSync(ledgerPath, { force: true });
+    const gapIdx = rows.findIndex((r) => r.kind === 'clock-gap');
+    const expiryIdx = rows.findIndex((r) => r.type === 'grant/offer-expired' || (r.kind === 'event' && r.data?.terminal === 'offer-expired'));
+    const gapRow = rows[gapIdx];
+    const expiryRow = rows[expiryIdx];
+    const witnessed = gapIdx >= 0 && typeof gapRow.gapMs === 'number' && gapRow.gapMs > 400 && !!gapRow.processEpoch;
+    const reconciledFirst = expiryIdx > gapIdx && expiryIdx >= 0;
+    const truthful = (expiryRow?.data?.overdueMs ?? 0) > 0 && typeof expiryRow?.data?.deadline === 'number';
+    return {
+      pass: witnessed && reconciledFirst && truthful,
+      detail: `gapWitnessed=${witnessed} (gapMs=${gapRow?.gapMs}, epoch=${gapRow?.processEpoch}) ` +
+        `reconciledBeforeSpeechProcessing=${reconciledFirst} truthfulLateness=${truthful} (overdueMs=${expiryRow?.data?.overdueMs})`,
     };
   },
 });

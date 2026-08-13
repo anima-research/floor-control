@@ -16,8 +16,11 @@ export interface GrantDecision {
   kind: 'grant';
   bidId: string;
   bidRevision: number;
-  /** Lease duration in ms from now; the service computes leaseUntil. */
-  leaseMs: number;
+  /** Offer accept-TTL in ms from now; the service computes acceptBy.
+   *  (FINDING-8: the offer clock is not the speech clock.) */
+  acceptTtlMs: number;
+  /** Speech-lease duration applied when acceptance is logged. */
+  speechLeaseMs: number;
 }
 
 export interface HoldDecision {
@@ -51,22 +54,39 @@ export class FluidFairnessLogic implements Logic {
    *  a repeatedly-unresponsive bidder must not recapture the floor forever. */
   private strikes = new Map<string, number>();
   private lastExpiredAt = new Map<string, number>();
-  private readonly leaseMs: number;
+  private readonly speechLeaseMs: number;
+  private readonly acceptTtlMs: Record<import('./types.js').ReadinessKind, number>;
   private readonly expiryBackoffMs: number;
   private readonly expiryBackoffCapMs: number;
 
   constructor(opts?: {
+    /** Speech-lease duration, counted FROM ACCEPTANCE (FINDING-8; Mica
+     *  2026-08-13: 30s retained, moved to acceptance — 10s rejected, 60s
+     *  showed no throughput gain). `leaseMs` is the legacy alias. */
+    speechLeaseMs?: number;
     leaseMs?: number;
+    /** Offer accept-TTLs per declared readiness kind, set from measured
+     *  relay latency with margin (phase-2 sweep: sustained median
+     *  offer→accept ≈10s on the portal relay, min ~1.5s). prepared implies
+     *  fast; intent gets the median plus margin; manual is a human. */
+    acceptTtlMs?: Partial<Record<import('./types.js').ReadinessKind, number>>;
     expiryBackoffMs?: number;
     expiryBackoffCapMs?: number;
     knobs?: Record<string, unknown>;
   }) {
-    this.leaseMs = opts?.leaseMs ?? 30_000;
-    this.expiryBackoffMs = opts?.expiryBackoffMs ?? this.leaseMs * 2;
-    this.expiryBackoffCapMs = opts?.expiryBackoffCapMs ?? this.leaseMs * 8;
+    this.speechLeaseMs = opts?.speechLeaseMs ?? opts?.leaseMs ?? 30_000;
+    this.acceptTtlMs = {
+      prepared: 15_000,
+      intent: 20_000,
+      urgent: 15_000,
+      manual: 60_000,
+      ...(opts?.acceptTtlMs ?? {}),
+    };
+    this.expiryBackoffMs = opts?.expiryBackoffMs ?? this.speechLeaseMs * 2;
+    this.expiryBackoffCapMs = opts?.expiryBackoffCapMs ?? this.speechLeaseMs * 8;
     this.contract = {
       logicId: 'fluid-fairness',
-      version: 2,
+      version: 3,
       bidFields: {
         readinessKind: 'intent | prepared | urgent',
         subjectRef: 'optional — what the turn answers',
@@ -75,7 +95,10 @@ export class FluidFairnessLogic implements Logic {
       eventShapes: ['floor:grant', 'floor:hold', 'floor:state', 'floor:idle'],
       api: [],
       knobs: {
-        leaseMs: this.leaseMs,
+        speechLeaseMs: this.speechLeaseMs,
+        acceptTtlMs: { ...this.acceptTtlMs },
+        lapseAfterIgnoredOffers: 3,
+        degradedAfterNoAcceptStreak: 3,
         expiryBackoffMs: this.expiryBackoffMs,
         expiryBackoffCapMs: this.expiryBackoffCapMs,
         ...(opts?.knobs ?? {}),
@@ -131,7 +154,13 @@ export class FluidFairnessLogic implements Logic {
     if (!this.eligible(chosen.participantId, now)) {
       return { kind: 'hold', reason: 'best bid cooling down after lease expiry' };
     }
-    return { kind: 'grant', bidId: chosen.bidId, bidRevision: chosen.revision, leaseMs: this.leaseMs };
+    return {
+      kind: 'grant',
+      bidId: chosen.bidId,
+      bidRevision: chosen.revision,
+      acceptTtlMs: this.acceptTtlMs[chosen.readinessKind],
+      speechLeaseMs: this.speechLeaseMs,
+    };
   }
 }
 

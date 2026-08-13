@@ -42,20 +42,21 @@ describe('a bid never self-grants', () => {
 });
 
 describe('positive expiry: grants cannot be open-ended', () => {
-  it('offerGrant refuses non-finite or non-future leaseUntil', () => {
+  it('offerGrant refuses non-finite or non-future timing', () => {
     const room = fluidRoom(svc);
     const b = bid(room.book, 'mica', 'b1', T0 + 1);
-    assert.throws(() => room.book.offerGrant(b.bidId, b.revision, Infinity, T0 + 2), /positive expiry/);
-    assert.throws(() => room.book.offerGrant(b.bidId, b.revision, T0 + 2, T0 + 2), /positive expiry/);
+    assert.throws(() => room.book.offerGrant(b.bidId, b.revision, { acceptBy: Infinity, speechLeaseMs: 30_000 }, T0 + 2), /positive expiry/);
+    assert.throws(() => room.book.offerGrant(b.bidId, b.revision, { acceptBy: T0 + 2, speechLeaseMs: 30_000 }, T0 + 2), /positive expiry/);
+    assert.throws(() => room.book.offerGrant(b.bidId, b.revision, { acceptBy: T0 + 30_000, speechLeaseMs: 0 }, T0 + 2), /positive expiry/);
   });
 
-  it('an overdue lease expires on tick with an idempotent receipt', () => {
+  it('an unanswered offer expires on tick with an idempotent offer-expired receipt', () => {
     const room = fluidRoom(svc);
     bid(room.book, 'mica', 'b1', T0 + 1);
     const { grant } = svc.arbitrate(room.roomId, T0 + 2);
-    room.book.tick(T0 + 20_000);
+    room.book.tick(T0 + 30_000); // past the intent accept-TTL (20s from offer)
     const receipt = room.book.receiptFor(grant!.grantId);
-    assert.equal(receipt?.terminal, 'expired');
+    assert.equal(receipt?.terminal, 'offer-expired');
     assert.equal(room.book.liveGrant, null);
   });
 
@@ -76,7 +77,7 @@ describe('revoke-before-regrant: one live grant per room, including handoffs', (
     bid(room.book, 'mica', 'b1', T0 + 1);
     const b2 = bid(room.book, 'sol', 'b2', T0 + 2);
     svc.arbitrate(room.roomId, T0 + 3);
-    assert.throws(() => room.book.offerGrant(b2.bidId, b2.revision, T0 + 30_000, T0 + 4), /revoke-before-regrant/);
+    assert.throws(() => room.book.offerGrant(b2.bidId, b2.revision, { acceptBy: T0 + 30_000, speechLeaseMs: 30_000 }, T0 + 4), /revoke-before-regrant/);
   });
 
   it('handoff requires a terminal receipt first', () => {
@@ -97,7 +98,7 @@ describe('grants bind the exact bid revision they answer', () => {
     const b = bid(room.book, 'mica', 'b1', T0 + 1);
     const r1 = b.revision;
     room.book.amendBid('b1', { subjectRef: 'agenda:2' }, T0 + 2);
-    assert.throws(() => room.book.offerGrant('b1', r1, T0 + 30_000, T0 + 3), /stale bid revision/);
+    assert.throws(() => room.book.offerGrant('b1', r1, { acceptBy: T0 + 30_000, speechLeaseMs: 30_000 }, T0 + 3), /stale bid revision/);
   });
 });
 
@@ -206,7 +207,7 @@ describe('binding claims: addressable, never auto-merged', () => {
     bid(room.book, 'mica', 'b1', T0 + 2);
     svc.arbitrate(room.roomId, T0 + 3);
     const b2 = bid(room.book, 'sol', 'b2', T0 + 4);
-    assert.throws(() => room.book.offerGrant(b2.bidId, b2.revision, T0 + 30_000, T0 + 5), /revoke-before-regrant/);
+    assert.throws(() => room.book.offerGrant(b2.bidId, b2.revision, { acceptBy: T0 + 30_000, speechLeaseMs: 30_000 }, T0 + 5), /revoke-before-regrant/);
   });
 });
 
@@ -255,18 +256,19 @@ describe('chaired logic: the book informs, the chair decides', () => {
     const b = bid(room.book, 'fable', 'hand1', T0 + 1, 'manual');
     const held = svc.arbitrate(room.roomId, T0 + 2);
     assert.equal(held.decision.kind, 'hold');
-    const grant = svc.chairGrant(room.roomId, 'antra', b.bidId, b.revision, 60_000, T0 + 3);
+    const grant = svc.chairGrant(room.roomId, 'antra', b.bidId, b.revision, { acceptTtlMs: 60_000, speechLeaseMs: 60_000 }, T0 + 3);
     assert.equal(grant.participantId, 'fable');
   });
 
   it('a non-chair actor is refused by the contract, and the chair is not exempt from invariants', () => {
     const room = chairedRoom(svc);
     const b = bid(room.book, 'fable', 'hand1', T0 + 1, 'manual');
-    assert.throws(() => svc.chairGrant(room.roomId, 'mallory', b.bidId, b.revision, 60_000, T0 + 2), /not this room's chair/);
-    svc.chairGrant(room.roomId, 'antra', b.bidId, b.revision, 60_000, T0 + 3);
+    const timing = { acceptTtlMs: 60_000, speechLeaseMs: 60_000 };
+    assert.throws(() => svc.chairGrant(room.roomId, 'mallory', b.bidId, b.revision, timing, T0 + 2), /not this room's chair/);
+    svc.chairGrant(room.roomId, 'antra', b.bidId, b.revision, timing, T0 + 3);
     const b2 = bid(room.book, 'mica', 'hand2', T0 + 4, 'manual');
     assert.throws(
-      () => svc.chairGrant(room.roomId, 'antra', b2.bidId, b2.revision, 60_000, T0 + 5),
+      () => svc.chairGrant(room.roomId, 'antra', b2.bidId, b2.revision, timing, T0 + 5),
       /revoke-before-regrant/,
       'chair power does not bypass one-live-grant',
     );
@@ -306,28 +308,29 @@ describe('contract digests', () => {
 
 describe('an expired lease charges fairness history (FINDING-1, ruling 2026-08-11)', () => {
   it('after expiry the other bidder is granted; backoff downranks but never excludes', () => {
-    const room = fluidRoom(svc); // leaseMs 10_000 → backoff 20_000, cap 80_000
+    const room = fluidRoom(svc); // speechLease 10_000 → backoff 20_000, cap 80_000; intent accept-TTL 20_000
     bid(room.book, 'sleeper', 'b1', T0 + 1);
     bid(room.book, 'alive', 'b2', T0 + 2);
     const g1 = svc.arbitrate(room.roomId, T0 + 3).grant;
     assert.equal(g1?.participantId, 'sleeper', 'arrival order first');
-    // Nobody accepts; the lease expires under the tick.
-    const after = svc.arbitrate(room.roomId, T0 + 20_000);
-    assert.equal(room.book.receiptFor(g1!.grantId)?.terminal, 'expired');
+    // Nobody accepts; the offer's accept-TTL (20s) elapses under the tick.
+    const after = svc.arbitrate(room.roomId, T0 + 25_000);
+    assert.equal(room.book.receiptFor(g1!.grantId)?.terminal, 'offer-expired');
     assert.equal(after.grant?.participantId, 'alive', 'expiry must not leave the sleeper "never held"');
-    svc.release(room.roomId, after.grant!.grantId, T0 + 21_000);
+    svc.release(room.roomId, after.grant!.grantId, T0 + 26_000);
     // Downrank (antra): while backed off, the sleeper loses to ANY eligible
     // competitor — even one who held the floor more recently…
-    bid(room.book, 'alive', 'b3', T0 + 22_000);
-    const contested = svc.arbitrate(room.roomId, T0 + 23_000);
+    bid(room.book, 'alive', 'b3', T0 + 27_000);
+    const contested = svc.arbitrate(room.roomId, T0 + 28_000);
     assert.equal(contested.grant?.participantId, 'alive', 'backed-off bidder loses every contested round');
-    svc.release(room.roomId, contested.grant!.grantId, T0 + 24_000);
+    svc.release(room.roomId, contested.grant!.grantId, T0 + 29_000);
     // …alone in the book during the bounded cooldown, the round holds
     // (immediate regrant would churn grant/expire at a non-responder)…
-    const solo = svc.arbitrate(room.roomId, T0 + 25_000);
+    const solo = svc.arbitrate(room.roomId, T0 + 30_000);
     assert.equal(solo.decision.kind, 'hold', 'solo backed-off bid cools down instead of churning');
-    // …and once the cooldown elapses, the sleeper is granted again.
-    const revived = svc.arbitrate(room.roomId, T0 + 20_000 + 20_001);
+    // …and once the cooldown elapses (expiry at 25_000 + backoff 20_000),
+    // the sleeper is granted again.
+    const revived = svc.arbitrate(room.roomId, T0 + 45_001);
     assert.equal(revived.grant?.participantId, 'sleeper', 'bounded: retry after cooldown, not never');
   });
 
@@ -335,12 +338,12 @@ describe('an expired lease charges fairness history (FINDING-1, ruling 2026-08-1
     const room = fluidRoom(svc);
     bid(room.book, 'p', 'b1', T0 + 1);
     const g1 = svc.arbitrate(room.roomId, T0 + 2).grant!;
-    svc.arbitrate(room.roomId, T0 + 20_000); // expire → strike 1
-    const g2 = svc.arbitrate(room.roomId, T0 + 40_001).grant!; // backoff elapsed, regrant
-    svc.release(room.roomId, g2.grantId, T0 + 40_002); // responsive: strikes clear
+    svc.arbitrate(room.roomId, T0 + 25_000); // accept-TTL elapsed → offer-expired → strike 1
+    const g2 = svc.arbitrate(room.roomId, T0 + 45_001).grant!; // backoff (20s from expiry) elapsed, regrant
+    svc.release(room.roomId, g2.grantId, T0 + 45_002); // responsive: strikes clear
     assert.notEqual(g1.grantId, g2.grantId);
-    bid(room.book, 'p', 'b2', T0 + 40_003);
-    const g3 = svc.arbitrate(room.roomId, T0 + 40_004).grant;
+    bid(room.book, 'p', 'b2', T0 + 45_003);
+    const g3 = svc.arbitrate(room.roomId, T0 + 45_004).grant;
     assert.equal(g3?.participantId, 'p', 'no residual backoff after a clean release');
   });
 });

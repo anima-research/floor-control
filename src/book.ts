@@ -45,6 +45,12 @@ export class FloorBook {
   private events: FloorEvent[] = [];
   private seq = 0;
   private grantCounter = 0;
+  /** FINDING-9 (Mica, K=3): consecutive ignored offers before a bid lapses. */
+  static readonly LAPSE_AFTER_IGNORED_OFFERS = 3;
+  /** FINDING-10 (Mica, N=3): room-wide no-accept streak before degradation telemetry. */
+  static readonly DEGRADED_AFTER_NO_ACCEPT_STREAK = 3;
+  private consecutiveOfferExpiries = 0;
+  private degradedEmitted = false;
 
   constructor(roomId: string, processEpoch: string) {
     this.roomId = roomId;
@@ -119,6 +125,7 @@ export class FloorBook {
         existing.expiresAt = env.expiresAt;
         existing.payload = env.payload;
         existing.revision += 1;
+        existing.ignoredOffers = 0; // a replace is a responsive act
         this.emit('bid/replaced', now, {
           bidId: existing.bidId,
           participantId: existing.participantId,
@@ -136,6 +143,7 @@ export class FloorBook {
       revision: 1,
       state: 'open',
       createdAt: now,
+      ignoredOffers: 0,
     };
     this.bids.set(bid.bidId, bid);
     this.emit('bid/created', now, { bidId: bid.bidId, participantId: bid.participantId, readinessKind: bid.readinessKind });
@@ -188,9 +196,15 @@ export class FloorBook {
 
   /** Offer a grant for the exact revision of an open bid. Refuses when a
    *  live grant exists (revoke-before-regrant), when the revision is stale,
-   *  when the bid's contract binding is not current, or when the expiry is
-   *  not positive and finite. */
-  offerGrant(bidId: string, bidRevision: number, leaseUntil: number, now: number): Grant {
+   *  when the bid's contract binding is not current, or when the timing is
+   *  not positive and finite. Two clocks (FINDING-8): `acceptBy` bounds the
+   *  offer; the speech lease is applied at acceptance, not here. */
+  offerGrant(
+    bidId: string,
+    bidRevision: number,
+    timing: { acceptBy: number; speechLeaseMs: number },
+    now: number,
+  ): Grant {
     const bid = this.mustBid(bidId);
     if (bid.state !== 'open') throw new Error(`bid ${bidId} is ${bid.state}, not open`);
     if (bid.revision !== bidRevision) {
@@ -202,8 +216,11 @@ export class FloorBook {
     if (this.activeGrant && this.activeGrant.state !== 'terminal') {
       throw new Error('revoke-before-regrant: a live grant exists in this room');
     }
-    if (!Number.isFinite(leaseUntil) || leaseUntil <= now) {
-      throw new Error('positive expiry: leaseUntil must be finite and after now');
+    if (!Number.isFinite(timing.acceptBy) || timing.acceptBy <= now) {
+      throw new Error('positive expiry: acceptBy must be finite and after now');
+    }
+    if (!Number.isFinite(timing.speechLeaseMs) || timing.speechLeaseMs <= 0) {
+      throw new Error('positive expiry: speechLeaseMs must be finite and positive');
     }
     this.grantCounter += 1;
     const grant: Grant = {
@@ -216,20 +233,41 @@ export class FloorBook {
       bidRevision,
       processEpoch: this.processEpoch,
       grantedAt: now,
-      leaseUntil,
+      acceptBy: timing.acceptBy,
+      speechLeaseMs: timing.speechLeaseMs,
+      leaseUntil: timing.acceptBy,
       state: 'offered',
     };
     bid.state = 'granted';
     this.activeGrant = grant;
-    this.emit('grant/offered', now, { grantId: grant.grantId, bidId, participantId: bid.participantId, leaseUntil });
+    this.emit('grant/offered', now, {
+      grantId: grant.grantId,
+      bidId,
+      participantId: bid.participantId,
+      acceptBy: timing.acceptBy,
+      speechLeaseMs: timing.speechLeaseMs,
+      leaseUntil: timing.acceptBy,
+    });
     return grant;
   }
 
+  /** Acceptance starts the speech lease (FINDING-8): a timely accept gets
+   *  the FULL lease regardless of pre-accept relay delay. A late accept is
+   *  refused explicitly — the offer is terminated offer-expired and the
+   *  caller gets an error to surface, never a silent zombie hold. */
   acceptGrant(grantId: string, now: number): Grant {
     const g = this.mustLiveGrant(grantId);
     if (g.state !== 'offered') throw new Error(`grant ${grantId} is ${g.state}`);
+    if (now > g.acceptBy) {
+      this.expireOffer(g, now);
+      throw new Error(`late accept refused: accept-TTL elapsed ${now - g.acceptBy}ms ago (grant ${grantId})`);
+    }
     g.state = 'accepted';
-    this.emit('grant/accepted', now, { grantId });
+    g.leaseUntil = now + g.speechLeaseMs;
+    const bid = this.bids.get(g.bidId);
+    if (bid) bid.ignoredOffers = 0; // acceptance clears the ignored-offer streak
+    this.noteAcceptance(now);
+    this.emit('grant/accepted', now, { grantId, leaseUntil: g.leaseUntil });
     return g;
   }
 
@@ -256,16 +294,63 @@ export class FloorBook {
     return this.terminate(grantId, 'revoked', now, reason);
   }
 
-  /** Deterministic time passage: expire overdue grants and bids. */
+  /** Deterministic time passage: expire overdue offers, leases, and bids.
+   *  The two grant clocks terminate differently (FINDING-8): an offered
+   *  grant past acceptBy is offer-expired (and feeds lapse + degradation
+   *  accounting); an accepted grant past its lease is lease-expired. */
   tick(now: number): void {
-    if (this.activeGrant && this.activeGrant.state !== 'terminal' && this.activeGrant.leaseUntil <= now) {
-      this.terminate(this.activeGrant.grantId, 'expired', now);
+    const g = this.activeGrant;
+    if (g && g.state === 'offered' && g.acceptBy <= now) {
+      this.expireOffer(g, now);
+    } else if (g && g.state === 'accepted' && g.leaseUntil <= now) {
+      this.terminate(g.grantId, 'lease-expired', now);
     }
     for (const bid of this.bids.values()) {
       if (bid.state === 'open' && bid.expiresAt !== null && bid.expiresAt <= now) {
         bid.state = 'expired';
         this.emit('bid/cancelled', now, { bidId: bid.bidId, reason: 'expired' });
       }
+    }
+  }
+
+  /** Offer-expiry bookkeeping shared by tick and late-accept refusal:
+   *  terminal receipt, per-bid ignored-offer streak (lapse at 3 —
+   *  FINDING-9, K=3), and the room-wide no-accept streak (degradation
+   *  telemetry at 3 — FINDING-10, N=3; emitted once per episode, recovery
+   *  receipt on next acceptance; never alters fairness or blocks bids). */
+  private expireOffer(g: Grant, now: number): void {
+    this.terminate(g.grantId, 'offer-expired', now);
+    const bid = this.bids.get(g.bidId);
+    if (bid) {
+      bid.ignoredOffers += 1;
+      if (bid.ignoredOffers >= FloorBook.LAPSE_AFTER_IGNORED_OFFERS && bid.state === 'open') {
+        bid.state = 'lapsed';
+        this.emit('bid/lapsed', now, {
+          bidId: bid.bidId,
+          participantId: bid.participantId,
+          revision: bid.revision,
+          cause: 'ignored-offers',
+          expiryCount: bid.ignoredOffers,
+        });
+      }
+    }
+    this.consecutiveOfferExpiries += 1;
+    if (this.consecutiveOfferExpiries >= FloorBook.DEGRADED_AFTER_NO_ACCEPT_STREAK && !this.degradedEmitted) {
+      this.degradedEmitted = true;
+      this.emit('book/degraded', now, {
+        noAcceptStreak: this.consecutiveOfferExpiries,
+        note: 'telemetry only: fairness, bids, and floor/idle are unaffected',
+      });
+    }
+  }
+
+  /** Acceptance resets the room-wide no-accept streak and closes any open
+   *  degradation episode with a recovery receipt. */
+  private noteAcceptance(now: number): void {
+    this.consecutiveOfferExpiries = 0;
+    if (this.degradedEmitted) {
+      this.degradedEmitted = false;
+      this.emit('book/recovered', now, {});
     }
   }
 
@@ -326,6 +411,11 @@ export class FloorBook {
     if (existing) return existing; // idempotent: exactly one terminal state
     const g = this.activeGrant;
     if (!g || g.grantId !== grantId) throw new Error(`no live grant ${grantId}`);
+    // Truthful lateness (Mica, host-sleep ruling): an expiry detected late is
+    // never represented as punctual — the receipt carries the scheduled
+    // deadline and how overdue detection was.
+    const deadline = g.state === 'offered' ? g.acceptBy : g.leaseUntil;
+    const overdueMs = Math.max(0, now - deadline);
     g.state = 'terminal';
     const receipt: Receipt = {
       grantId,
@@ -340,12 +430,15 @@ export class FloorBook {
     if (bid && bid.state === 'granted') {
       // Declined/revoked/expired turns return the bid to the book so the
       // participant may be matched again; released/completed consume it.
+      // (Lapse, when due, is applied by expireOffer after this returns.)
       bid.state = terminal === 'released' || terminal === 'completed' ? 'cancelled' : 'open';
     }
     this.activeGrant = g; // kept for receipt lineage; liveGrant getter filters terminal
+    const isExpiry = terminal === 'offer-expired' || terminal === 'lease-expired';
     this.emit(`grant/${terminal === 'completed' ? 'released' : terminal}` as FloorEvent['type'], now, {
       grantId,
       terminal,
+      ...(isExpiry ? { deadline, overdueMs } : {}),
       ...(reason ? { reason } : {}),
     });
     return receipt;

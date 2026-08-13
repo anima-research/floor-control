@@ -13,7 +13,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { FloorService } from '../src/service.js';
-import type { Logic } from '../src/logics.js';
+import { FluidFairnessLogic, type Logic } from '../src/logics.js';
 import type { Grant } from '../src/types.js';
 import { parseOp, parseDuration, eventLine, type FloorOp } from './band.js';
 import type { InboundMessage, RoomTransport } from './transport.js';
@@ -29,6 +29,9 @@ export interface HostOptions {
    *  `floor/idle` event that wake policies and standing-ready clients can
    *  target — liveness never depends on an unlogged human nudge. */
   idleAfterMs?: number;
+  /** Clock-gap witness threshold (host-sleep ruling). Default
+   *  max(10s, 10×tickMs); the loopback suspend/resume scenario shrinks it. */
+  clockGapThresholdMs?: number;
 }
 
 export class FloorRoomHost {
@@ -54,7 +57,7 @@ export class FloorRoomHost {
 
   constructor(
     private transport: RoomTransport,
-    logic: Logic,
+    private logic: Logic,
     private opts: HostOptions = {},
   ) {
     this.service = new FloorService(`trial-${Date.now().toString(36)}`);
@@ -90,6 +93,11 @@ export class FloorRoomHost {
   // ── inbound ──
 
   private onMessage(m: InboundMessage): void {
+    // Suspend/resume discipline (Mica, host-sleep ruling): detect and log
+    // any clock gap, then reconcile every overdue offer/lease BEFORE
+    // processing new grants or speech. The book's expiry receipts carry
+    // deadline+overdueMs, so a late expiry is never represented as punctual.
+    this.reconcileClock(m.at);
     if (m.surface === 'room') {
       this.lastRoomMessageId = m.messageId;
       this.lastActivityAt = m.at;
@@ -117,14 +125,26 @@ export class FloorRoomHost {
     const c = this.book.currentContract!;
     switch (op.verb) {
       case 'join': {
+        // FINDING-7 (accepted 2026-08-13): a GENUINE join is a logged
+        // liveness transition and begins a new quiet epoch — a newcomer
+        // must be able to receive a fresh floor/idle; an idle emitted
+        // before they existed is not notice to them. Duplicate processing
+        // of the same participant's join is idempotent: the notice is
+        // re-sent, but it is not a second liveness transition (no repeated
+        // wake). Re-arm stays event-driven; no periodic source exists.
+        const firstJoin = !this.joined.has(pid);
         this.joined.set(pid, c.contractDigest);
+        if (firstJoin) {
+          this.lastActivityAt = now;
+          this.lastActivityCause = 'participant/joined';
+        }
         void this.transport.sendControl(
           eventLine('joined', {
             participant: m.authorName,
             logic: c.contract.logicId,
             epoch: c.logicEpoch,
             digest: c.contractDigest.slice(0, 12),
-            leaseMs: c.contract.knobs.leaseMs,
+            speechLeaseMs: c.contract.knobs.speechLeaseMs,
           }),
         );
         return;
@@ -161,7 +181,23 @@ export class FloorRoomHost {
         this.book.cancelBid(this.mustId(op), now);
         return;
       case 'accept':
-        this.book.acceptGrant(this.mustId(op), now);
+        // A late accept is refused EXPLICITLY (FINDING-8): the book
+        // terminates the offer as offer-expired and throws; the refusal
+        // goes back on the control band rather than leaving the sender
+        // believing it holds a floor the book already reclaimed.
+        try {
+          this.book.acceptGrant(this.mustId(op), now);
+        } catch (err) {
+          const reason = (err as Error).message;
+          if (reason.startsWith('late accept refused')) {
+            this.ledger({ kind: 'late-accept-refused', at: now, participantId: pid, grantId: this.mustId(op) });
+            void this.transport.sendControl(
+              eventLine('accept/refused', { grantId: this.mustId(op), participant: m.authorName, reason: 'accept-ttl-elapsed' }),
+            );
+            return;
+          }
+          throw err;
+        }
         return;
       case 'decline':
         this.service.decline(this.roomId, this.mustId(op), now, op.args.reason);
@@ -202,9 +238,41 @@ export class FloorRoomHost {
   /** Arbitrate + flush: the host's heartbeat, also run after every inbound. */
   pump(): void {
     const now = Date.now();
+    this.reconcileClock(now);
     const { grant } = this.service.arbitrate(this.roomId, now);
     this.flush(grant);
     this.checkIdle(now);
+  }
+
+  /** Clock-gap witness: a tick that arrives far later than the cadence
+   *  promises means the process was suspended (or starved). The gap is
+   *  ledgered with the process epoch preserved, and the book reconciles
+   *  every overdue deadline in one deterministic pass before any new
+   *  arbitration or speech is processed. */
+  private lastClockSeen = Date.now();
+  private reconcileClock(now: number): void {
+    const cadence = this.opts.tickMs ?? 500;
+    const gapMs = now - this.lastClockSeen;
+    if (gapMs > (this.opts.clockGapThresholdMs ?? Math.max(10_000, cadence * 10))) {
+      this.ledger({
+        kind: 'clock-gap',
+        at: now,
+        gapMs,
+        expectedCadenceMs: cadence,
+        processEpoch: this.book.processEpoch,
+      });
+      // Close overdue state before anything new — and keep the fairness
+      // accounting the service would have applied had the tick been on time.
+      const preTick = this.book.liveGrant;
+      this.book.tick(now);
+      if (preTick && !this.book.liveGrant && this.logic instanceof FluidFairnessLogic) {
+        const receipt = this.book.receiptFor(preTick.grantId);
+        if (receipt?.terminal === 'offer-expired' || receipt?.terminal === 'lease-expired') {
+          this.logic.noteExpired(preTick.participantId, now);
+        }
+      }
+    }
+    this.lastClockSeen = now;
   }
 
   private checkIdle(now: number): void {
@@ -241,7 +309,7 @@ export class FloorRoomHost {
       // not progress — it must not keep resetting the idle clock while an
       // unresponsive bidder churns (otherwise the room can never signal
       // open-floor to standing-ready participants).
-      if (e.type !== 'grant/offered' && e.type !== 'grant/expired') {
+      if (e.type !== 'grant/offered' && e.type !== 'grant/offer-expired' && e.type !== 'grant/lease-expired') {
         this.lastActivityAt = e.at;
         this.lastActivityCause = e.type;
       }
