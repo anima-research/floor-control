@@ -195,6 +195,51 @@ scenarios.push({
   },
 });
 
+scenarios.push({
+  name: 'S6 late joiner after the one-shot idle fired — join is not a liveness transition, so no wake ever arrives (FINDING-7, documented gap)',
+  gate: 'idle-event vs standing-bid comparison: the participant who most needs the open-floor signal is the one who arrived after it fired',
+  async run() {
+    const { bus, host, bots } = rig({
+      leaseMs: 1000,
+      bots: [1, 2].map((i) => ({ name: `bot-${i}`, profile: 'talkative' as const, maxTurns: 1, thinkMs: 30 })),
+    });
+    host.start();
+    for (const b of bots) await b.start();
+    await sleep(100);
+    bus.post('ra-human', 'ra-human', 'room', 'seed: say your piece.');
+    await until(() => bots.every((b) => b.turnsTaken >= 1), 10_000);
+    // Wait out the quiet lease: the one-shot fires, then disarms.
+    await until(() => host.idleEmissions >= 1, 5_000);
+    const emissionsAtJoin = host.idleEmissions;
+
+    // NOW a poll-based participant joins the quiet room. Prediction from the
+    // code read: join updates no book state -> not a logged liveness
+    // transition -> the idle signal never re-arms -> no wake, no bid, no
+    // grant, across arbitrarily many idle periods.
+    const late = new ScriptedBot(new LoopbackTransport(bus, 'late-bot', 'late-bot'), 'late-bot', {
+      name: 'late-bot', profile: 'talkative', maxTurns: 1, thinkMs: 30,
+    });
+    await late.start();
+    await sleep(4000); // > 3 idle periods at idleAfterMs=1200
+    const stalled = late.turnsTaken === 0;
+    const noNewEmission = host.idleEmissions === emissionsAtJoin;
+    const noJoinRearm = !host.idleRearms.some((r) => r.at > 0 && r.cause.includes('join'));
+
+    // Contrast: the late bot is perfectly capable — one human utterance
+    // (a real liveness transition) and it bids and takes the floor. Only
+    // the signal was missing, not the participant.
+    bus.post('ra-human', 'ra-human', 'room', 'anyone here?');
+    const recovered = await until(() => late.turnsTaken >= 1, 8_000);
+
+    host.stop();
+    return {
+      pass: stalled && noNewEmission && noJoinRearm && recovered,
+      detail: `stalledAcrossIdlePeriods=${stalled} emissionsWhileStalled=+${host.idleEmissions - emissionsAtJoin} ` +
+        `recoveredOnRealSpeech=${recovered} rearmCauses=${JSON.stringify(host.idleRearms.map((r) => r.cause))}`,
+    };
+  },
+});
+
 const results: Array<{ name: string; gate: string; pass: boolean; detail: string }> = [];
 for (const s of scenarios) {
   process.stdout.write(`\n▶ ${s.name}\n`);
