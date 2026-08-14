@@ -128,6 +128,34 @@ export class FloorService {
     return receipt;
   }
 
+  /** Acceptance through the service, so terminal bookkeeping has one owner
+   *  (Mica delta review 2026-08-13). A timely accept starts the speech
+   *  lease. A LATE accept is refused explicitly by the book — and charges
+   *  the same fairness history/strike as any other offer-expiry, exactly
+   *  once: without this, the late/jitter path from FINDING-8 would bypass
+   *  FINDING-1's repair and the refused bidder could be re-granted one
+   *  arbitration later. The following pump cannot double-charge — by the
+   *  time it runs, the grant is already terminal, so arbitrate's
+   *  offered→expired observation never fires for it. */
+  accept(roomId: string, grantId: string, now: number): Grant {
+    const room = this.mustRoom(roomId);
+    const holder = room.book.liveGrant;
+    try {
+      return room.book.acceptGrant(grantId, now);
+    } catch (err) {
+      if (
+        holder &&
+        holder.grantId === grantId &&
+        (err as Error).message.startsWith('late accept refused') &&
+        room.book.receiptFor(grantId)?.terminal === 'offer-expired' &&
+        room.logic instanceof FluidFairnessLogic
+      ) {
+        room.logic.noteExpired(holder.participantId, now);
+      }
+      throw err;
+    }
+  }
+
   decline(roomId: string, grantId: string, now: number, reason?: string): Receipt {
     const room = this.mustRoom(roomId);
     const grant = room.book.liveGrant;

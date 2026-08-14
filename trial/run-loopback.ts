@@ -216,8 +216,12 @@ scenarios.push({
     await sleep(100);
     bus.post('ra-human', 'ra-human', 'room', 'seed: say your piece.');
     await until(() => bots.every((b) => b.turnsTaken >= 1), 10_000);
-    // Wait out the quiet lease: the one-shot fires, then disarms.
-    await until(() => host.idleEmissions >= 1, 5_000);
+    // Wait out the quiet lease: the one-shot fires, then disarms. The wide
+    // window covers the honest slow path: a settled bot's leftover standing
+    // bid can grant/expire-cycle through the lapse machinery (~3 backoff
+    // rounds) before the room is genuinely quiet — FINDING-9's phenomenon
+    // at loopback scale, resolved by bid/lapsed, then idle fires.
+    await until(() => host.idleEmissions >= 1, 15_000);
     const emissionsAtJoin = host.idleEmissions;
 
     // A poll-based participant joins the quiet room AFTER the emission.
@@ -232,7 +236,7 @@ scenarios.push({
     // Duplicate processing of the same join (relay redelivery): idempotent,
     // never a second liveness transition.
     await lateTransport.sendControl('!floor join');
-    const woke = await until(() => late.turnsTaken >= 1, 8_000);
+    const woke = await until(() => late.turnsTaken >= 1, 10_000);
     const freshEmission = host.idleEmissions === emissionsAtJoin + 1;
     const joinRearms = host.idleRearms.filter((r) => r.cause === 'participant/joined').length;
 

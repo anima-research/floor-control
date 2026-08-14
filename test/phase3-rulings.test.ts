@@ -198,6 +198,53 @@ describe('FINDING-10 — degradation telemetry, N=3 (discriminators 6, 7)', () =
   });
 });
 
+describe('delta-review blocker — late accept charges fairness through the real route (Mica 2026-08-13)', () => {
+  // All six points of the requested discriminator, through service.accept —
+  // the path the host actually calls. On ebf1ba7 the host called
+  // book.acceptGrant directly, the refusal bypassed noteExpired, and the
+  // refused bidder could be re-granted one arbitration later.
+
+  it('1+2: a late accept through the service is refused explicitly, terminal offer-expired', () => {
+    const r = room(svc);
+    bid(r.book, 'jittery', 'b1', T0 + 1);
+    const g = svc.arbitrate(r.roomId, T0 + 2).grant!;
+    assert.throws(() => svc.accept(r.roomId, g.grantId, g.acceptBy + 1), /late accept refused/);
+    assert.equal(r.book.receiptFor(g.grantId)?.terminal, 'offer-expired');
+  });
+
+  it('4: in the contested round after a late-accept refusal, the other eligible bidder wins', () => {
+    const r = room(svc);
+    bid(r.book, 'jittery', 'b1', T0 + 1);
+    bid(r.book, 'punctual', 'b2', T0 + 2);
+    const g = svc.arbitrate(r.roomId, T0 + 3).grant!;
+    assert.equal(g.participantId, 'jittery', 'arrival order first');
+    assert.throws(() => svc.accept(r.roomId, g.grantId, g.acceptBy + 1), /late accept refused/);
+    // One millisecond later — Mica's reproduction window. On ebf1ba7 the
+    // refused bidder won this round again.
+    const next = svc.arbitrate(r.roomId, g.acceptBy + 2).grant;
+    assert.equal(next?.participantId, 'punctual', 'the late accepter is backed off, not re-granted');
+  });
+
+  it('3+5+6: a solo late accepter is held for exactly ONE bounded backoff — charged once, not twice by the following pump', () => {
+    const r = room(svc);
+    bid(r.book, 'solo', 'b1', T0 + 1);
+    const g = svc.arbitrate(r.roomId, T0 + 2).grant!;
+    const refusedAt = g.acceptBy + 1;
+    assert.throws(() => svc.accept(r.roomId, g.grantId, refusedAt), /late accept refused/);
+    // The following pump: must observe no offered→expired transition (the
+    // grant is already terminal) and therefore must not charge again.
+    const pumpAfter = svc.arbitrate(r.roomId, refusedAt + 1);
+    assert.equal(pumpAfter.decision.kind, 'hold', 'solo bidder held during backoff');
+    // Strike 1 backoff is 10_000 (this room's knob). Exactly-once charging
+    // means eligibility returns at refusedAt + 10_000; a double charge
+    // would hold until +20_000.
+    const stillHeld = svc.arbitrate(r.roomId, refusedAt + 9_999);
+    assert.equal(stillHeld.decision.kind, 'hold', 'bounded backoff not yet elapsed');
+    const revived = svc.arbitrate(r.roomId, refusedAt + 10_001).grant;
+    assert.equal(revived?.participantId, 'solo', 'single charge: eligible after ONE backoff, not two');
+  });
+});
+
 describe('host-sleep ruling — truthful lateness (discriminator 9, book half)', () => {
   it('an expiry detected late carries its scheduled deadline and overdueMs — never represented as punctual', () => {
     const r = room(svc);

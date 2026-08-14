@@ -41,6 +41,7 @@ export class ScriptedBot {
    *  from one participant are legal, and unmanaged ones capture the floor). */
   private bidInFlight = false;
   private prepared: { subject: string; text: string; preparedAt: number } | null = null;
+  private bargedOnce = false;
   turnsTaken = 0;
   grantsSeen = 0;
   stalesDeclined = 0;
@@ -108,7 +109,10 @@ export class ScriptedBot {
         return;
       }
       case 'rude':
-        if (Math.random() < 0.5) {
+        // First reaction always barges (a probe that never misbehaves
+        // proves nothing — scenario determinism); after that, coin-flip.
+        if (!this.bargedOnce || Math.random() < 0.5) {
+          this.bargedOnce = true;
           await this.transport.sendRoom(`${this.opts.name} barges in without the floor.`);
         } else if (!this.myBidId && !this.bidInFlight) {
           this.bidInFlight = true;

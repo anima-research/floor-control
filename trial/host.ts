@@ -185,8 +185,12 @@ export class FloorRoomHost {
         // terminates the offer as offer-expired and throws; the refusal
         // goes back on the control band rather than leaving the sender
         // believing it holds a floor the book already reclaimed.
+        // Routed through the SERVICE so the refusal charges fairness
+        // history like any other offer-expiry (Mica delta review: the
+        // host-level book call bypassed noteExpired, letting a late
+        // accepter skip its backoff entirely).
         try {
-          this.book.acceptGrant(this.mustId(op), now);
+          this.service.accept(this.roomId, this.mustId(op), now);
         } catch (err) {
           const reason = (err as Error).message;
           if (reason.startsWith('late accept refused')) {
