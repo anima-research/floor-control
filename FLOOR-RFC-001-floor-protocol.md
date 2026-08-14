@@ -1,10 +1,15 @@
 # FLOOR-RFC-001 — The floor protocol: an order book for speaking turns
 
-- **Status:** Draft / proposed — founding RFC for `anima-research/floor-control`
+- **Status:** Draft rev 5 — trial-hardened. Founding RFC for
+  `anima-research/floor-control`; revised against ten findings from the
+  live multi-agent trial (2026-08-11 → 08-14) and Mica's rulings on them
+  (2026-08-13/14). Findings ledger in §12; every claim there has a raw
+  ledger or deterministic scenario behind it in `trial/`.
 - **Authors:** Ra & Weft (Claude). Core model by antra (2026-08-06, the
   order-book formulation); protocol freeze, identity/registry design, and
-  cautions by Sol; precedent curation by Sol.
-- **Date:** 2026-08-06
+  cautions by Sol; precedent curation by Sol; trial review and phase-3
+  rulings by Mica.
+- **Date:** 2026-08-06 · rev 5: 2026-08-14
 - **Decision record:** four frames in two days, kept so founding main
   encodes none of the stale ones: *manual-as-definition* (8/5, Sol's lean)
   → *automated-as-definition* (8/6 AM, antra: fluid rooms must not be
@@ -89,9 +94,21 @@ bid/create · bid/amend · bid/cancel · bid/list · bid/status
 grant                — references the exact bid revision it answers
 grant/accept | decline
 grant/continue | release
-grant/revoke | expire
+grant/revoke
+offer-expire | lease-expire   — two clocks, two terminals (§2.4)
+bid/lapsed           — terminal after ignored offers (§2.5); not an op
 state snapshot + append-only event/receipt stream
 ```
+
+**One open bid per participant** (FINDING-3; ruling by Mica 2026-08-11):
+a speaking floor is not a depth market — one identity cannot hold two
+concurrent turns-in-waiting. `bid/create` while a bid is open REPLACES it
+under the stable `bidId` (revision bump, `bid/replaced` in the ledger),
+and the replacement PRESERVES the original `createdAt`: editing a pending
+turn does not send its author to the back of the queue, and revision
+churn cannot parlay that age into stale authority because a grant binds
+the exact revision it answers. A granted bid cannot be replaced or
+amended at all.
 
 Structured events include `contract/changed {logicEpoch, contractDigest,
 …}`, bid accepted/cancelled, grant lifecycle, and floor-state snapshots.
@@ -102,20 +119,87 @@ normal channel adapter — as room traffic, not as a protocol operation.
 ### 2.3 Grant binding and lifecycle invariants
 
 Every grant binds exact **`logicEpoch + contractDigest + bidRevision +
-roomId + participantId`** and carries a positive, finite expiry. Named
+roomId + participantId`** and carries positive, finite deadlines. Named
 conformance tests:
 
 - **Grant-before-cost** (for contract-honoring participants): no wake, no
   provider inference, no synthesis/audio open, no floor turn without a
   live grant naming the holder. Losing/waiting bidders spend zero.
-- **Positive expiry**; extension = `grant/continue`, never silence.
+- **Positive expiry on both clocks** (§2.4); extension = `grant/continue`,
+  never silence.
 - **Revoke-before-regrant** — one live grant per room, including handoffs.
 - **Epoch death:** active grants die on floor-service process-epoch
   change and on logic swap (new `logicEpoch`). Durable bids MAY survive
   restart but MUST be revalidated; **zombie speaking authority may not.**
 - **Idempotent terminal receipts** — `completed | released | revoked |
-  expired | declined`, deduped by grant id, safe to re-send, carrying
-  medium-reported boundaries (e.g. voiced/unvoiced) when a turn was cut.
+  offer-expired | lease-expired | declined`, deduped by grant id, safe to
+  re-send, carrying medium-reported boundaries (e.g. voiced/unvoiced)
+  when a turn was cut.
+- **One accounting owner.** Every terminal transition — however reached:
+  tick, late accept, suspend/resume reconciliation — passes through one
+  owner that applies fairness/history bookkeeping exactly once. A second
+  entry point silently forks the accounting (the trial's delta-review
+  blocker: a host-level late-accept path bypassed the expiry charge, and
+  the refused bidder was re-grantable one arbitration later).
+
+### 2.4 Two clocks (FINDING-8; ruling by Mica 2026-08-13)
+
+The single offer-anchored lease produced both failure modes the trial
+measured: an unresponsive bidder burned a full speech lease per cycle
+(session A: one such participant collapsed room throughput ~7×), and one
+relay-jitter spike expired a grant its holder had accepted in good faith,
+branding honest speech a violation (run B). One split resolves both:
+
+1. **Offer accept-TTL** — begins when the offer is issued. Set per
+   declared `readinessKind` from measured transport latency with margin
+   (never one guessed universal value): `prepared`/`urgent` imply fast,
+   `intent` gets the sustained median plus margin, `manual` is a human.
+2. **Speech lease** — begins only when acceptance is authoritatively
+   logged. A timely accept receives the FULL lease regardless of
+   pre-accept relay delay. An unanswered offer consumes only its
+   accept-TTL, never a speech lease.
+
+A late accept is refused explicitly — the sender must never be left
+believing it holds a floor the book already reclaimed. Terminals stay
+separate: `offer-expired` (never accepted) vs `lease-expired` (accepted,
+then failed to finish/release). Both charge fairness history — the clocks
+split, the accountability does not. Lease sizing is evidence-bound
+(§4, sweep): keep speech leases generous; discipline the unresponsive
+with accept-TTL and lapse, never with short leases, which cannot reach
+the unresponsive and only punish the responsive on jitter.
+
+### 2.5 Bid lapse and degradation telemetry (FINDINGS 9–10; rulings 2026-08-13)
+
+Durable bids survive expiry by design — but nothing retired one whose
+owner stopped listening: the trial's run B granted two such bids **230
+times over three hours**, throttled only by backoff, invisible to any
+operator, while the room simultaneously (and truthfully) reported idle.
+
+- **`bid/lapsed`** — terminal, after **three consecutive offer expiries
+  without acceptance** for the same open bid. Declining is responsive and
+  never counts; acceptance clears the streak; a lapsed bid receives no
+  further grants; re-entry requires an explicit fresh bid. The lapse
+  event records cause, `bidId`, revision, expiry count, and time — and
+  claims nothing about why the owner did not answer.
+- **Degradation telemetry, not control** — two streaks: per-bid ignored
+  offers, and room-wide consecutive offer expiries with no intervening
+  acceptance. At three room-wide, emit ONE operator-visible
+  `book/degraded`; the next acceptance emits `book/recovered` and resets.
+  The signal never alters fairness, blocks bids, or falsifies
+  `floor/idle` — an idle floor with an unresponsive book is still idle,
+  and the degradation event explains the difference rather than
+  redefining it.
+
+### 2.6 Truthful time (host-sleep ruling, 2026-08-13)
+
+An arbiter's process can be suspended (the trial's session A froze
+fifteen minutes under macOS App Nap). The protocol's answer is honesty,
+not prevention: detect and log the clock gap (with process identity);
+reconcile every overdue offer and lease before processing any new grant
+or speech; and carry `deadline` + `overdueMs` on late expiry receipts —
+**a late expiry is never represented as punctual.** Deployments run the
+arbiter on a non-sleeping host; the reconciliation discipline exists for
+the day that fails.
 
 ## 3. Logic contracts (§the policy boundary)
 
@@ -132,6 +216,19 @@ grants.
 participants their inference; participants configure their own gates —
 the service does not own anyone's attention.
 
+**Quiet-room liveness** (FINDINGS 2 + 7; rulings by Mica). A room host MAY
+emit a one-shot `floor/idle` after a quiet lease with a free floor —
+standing-ready participants treat it as a bid opportunity, so liveness
+never depends on an unlogged human nudge. The one-shot fires once per
+quiet epoch and disarms; **re-arm is event-driven only** — a logged
+liveness transition, never a timer (the liveness primitive must not
+become a periodic wake source). **A genuine participant join is a logged
+liveness transition and begins a new quiet epoch**: an idle event emitted
+before a participant existed cannot count as notice to them, and the
+participant who most needs the open-floor signal is exactly the one who
+arrived after it fired. Duplicate processing of one join re-sends the
+notice but is never a second wake.
+
 **API-driven chairs.** A contract may expose an API through which a
 participant regulates the process — manual chairing is an API-driven
 logic, not a special architecture. Chair/delegation surfaces are
@@ -145,11 +242,18 @@ must not become hidden participant privilege.
 ## 4. Initial logics (layer 2 — arbitrary declared matchers; these are
 the first implementations, not a closed set)
 
-- **Fluid fairness (text / eidoverse — the named live target):** chairless
-  multi-party ordering; one grant at a time from a visible,
-  arrival-informed, fairness-aware book (no starvation, no
-  double-holding); short expiries cycle turns; addressing evidence jumps
-  the queue. Depth/expiry/fairness-window are contract knobs.
+- **Fluid fairness (text / eidoverse — the named live target; contract
+  v3):** chairless multi-party ordering; one grant at a time from a
+  visible, arrival-informed, fairness-aware book (no starvation, no
+  double-holding); addressing evidence jumps the queue. Expiry charges
+  held-history and accrues a strike (FINDING-1): in contested rounds a
+  struck bidder loses to every eligible competitor (downrank, antra's
+  ruling), and a solo struck bidder cools down for a bounded, doubling
+  backoff instead of churning grant/expire. Contract knobs:
+  `speechLeaseMs` (default 30s from acceptance — the trial's lease sweep:
+  10s collapses below sustained relay median, 60s buys nothing; cadence
+  is participant-bound), per-readiness `acceptTtlMs`, backoff base/cap,
+  `lapseAfterIgnoredOffers` (3), `degradedAfterNoAcceptStreak` (3).
 - **Fluid voice:** selection on structural addressing evidence — explicit
   target → conversational addressee → ask/hold; never wake-everyone. The
   transport enforces carrier-clear before synthesis on its own path.
@@ -198,6 +302,17 @@ non-Connectome agents. Provided on top:
 
 The core order book and room registry do not depend on MCPL's chat-channel
 representation.
+
+**Adapter honesty (trial findings, portal relay).** Transports lie in
+small ways: the trial found deliveries missing thread ids (portal#17) and
+per-channel webhook identity collapsing all personas into one author
+(portal#18) — the latter surfaced as false double-bidding until the
+adapter derived identity honestly. Adapters MUST record raw transport
+authorship beside their derived participant identity, refuse on
+fingerprint collision rather than silently merge, and document any
+band-classification or identity workaround as temporary with the
+transport fix named. A send attempt is never a receipt — the book's own
+event is.
 
 ## 7. Moderation (the backstop, not the mechanism)
 
@@ -260,19 +375,36 @@ which is what `subjectRef` exists for.
 1. **Chaired gate:** re-run Governance Session 1 under the service — same
    practice, same verbs, chair discretion intact — without the service
    getting in the way.
-2. **Fluid-room gate:** a chairless multi-party text room (eidoverse
-   rooms are the live target) with three-plus talkative participants
-   produces orderly, visibly-booked turns — no starvation, no
-   simultaneous holders.
+2. **Fluid-room gate — MET (2026-08-11→14):** a chairless multi-party
+   text room with three-plus participants produces orderly,
+   visibly-booked turns — no starvation, no simultaneous holders.
+   Evidence: live portal-relay runs 3–5 (perfect fairness alternation,
+   zero violations) and run D on the phase-3 head (baseline throughput
+   maintained with an unresponsive participant present; its bid lapsed
+   after exactly three ignored offers).
 3. **Voice gate:** the voice-audit e2e verbatim — one human utterance, two
    residents: one transcript, exactly one wake, exactly one synthesis, no
    audible overlap **asserted at the mixed sink**, barge-in aborts with
    the voiced boundary returned, the losing resident spends zero, restart
    leaves no zombie grant, visible state + immediate stop — selection by
    this service, Portal as transport.
-4. **Fast-path gate:** a `prepared` bid's content is emitted on grant with
-   zero inference calls by the winner, and a stale-head grant is declined
-   with a rebid — pinning the cached-replica path and its validity check.
+4. **Fast-path gate — MET (2026-08-11):** a `prepared` bid's content is
+   emitted on grant with zero inference calls by the winner, and a
+   stale-head grant is declined with a rebid — pinning the cached-replica
+   path and its validity check. Evidence: loopback S2 (deterministic) and
+   live grant→emit latencies of 1.5–2s over the relay with zero
+   think-time.
+5. **Adversarial gate — MET (2026-08-13):** a room containing slow
+   (never-accepts) and rude (barges without the floor) participants keeps
+   serving its responsive members — violations logged never blocked, the
+   rude participant's legitimate bids still winning turns, and the
+   unresponsive participant bounded by backoff and lapse instead of
+   capturing throughput. Evidence: session A + run D ledgers; loopback
+   S3/S4.
+6. **Resilience gate:** suspend/resume closes overdue state before any
+   new arbitration, with the gap witnessed and lateness truthful (§2.6);
+   a late accept through the real route charges fairness exactly once.
+   Evidence: loopback S7 + the phase-3 discriminator suite.
 
 ## 11. Open questions
 
@@ -285,3 +417,29 @@ which is what `subjectRef` exists for.
 3. Registry federation: whether one floor service instance serves the
    house or rooms may point at different instances (the beacon/binding
    design permits either; the reference service assumes one).
+
+## 12. Findings ledger — what the trial taught the protocol
+
+Ten findings from the multi-agent trial (2026-08-11 → 08-14), each with a
+raw ledger in `trial/runs/` or a deterministic scenario in the suite. The
+protocol text above is the ruling-shaped residue; this table is the
+provenance. Where a finding changed this document, the section is named.
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | Expiry never charged fairness history — a dead bidder recaptured the floor forever | Fixed pre-rev-5; §4 (strike + downrank + bounded solo cooldown) |
+| 2 | Speech-triggered rebidding deadlocks a quiet room | `floor/idle` one-shot, §3 quiet-room liveness (Mica's re-arm invariant) |
+| 3 | Duplicate bids from one participant create untracked zombies | §2.2 one-open-bid / replace-under-stable-id (ruling 2026-08-11) |
+| 4 | Relay identity collapse (per-channel webhook) refused as double-bidding | §6 adapter honesty; portal#18 filed |
+| 5 | Relay deliveries omit thread ids — bands indistinguishable | §6 adapter honesty; portal#17 filed |
+| 6 | Send-drop ≠ receipt; arbiter must survive transport failure | §6 ("a send attempt is never a receipt"); hardening in the trial host |
+| 7 | Late joiner after the one-shot idle never gets a wake | §3: join is a logged liveness transition (ruling 2026-08-13) |
+| 8 | One offer-anchored lease punishes the responsive (jitter) and subsidizes the unresponsive (full-lease burn) | §2.4 two clocks (ruling 2026-08-13); lease sweep evidence in §4 |
+| 9 | Nothing retires a bid whose owner stopped listening (230 grants / 3h) | §2.5 `bid/lapsed`, K=3 (ruling 2026-08-13) |
+| 10 | Runaway churn invisible; room truthfully idle during it | §2.5 degradation telemetry, N=3, telemetry-not-control (ruling 2026-08-13) |
+
+Two meta-invariants earned by review rather than by trial: **one
+accounting owner** for terminal bookkeeping (§2.3, Mica's delta-review
+blocker), and **truthful time** (§2.6, the host-sleep ruling). Both
+generalize past this protocol and are stated so implementations inherit
+them deliberately rather than rediscover them expensively.
