@@ -39,13 +39,28 @@ export type BidState =
   | 'stale'
   /** Resolved into a recorded contribution without a grant (the Session 1
    *  one-sentence substitute, generalized — §8). */
-  | 'substituted';
+  | 'substituted'
+  /** Terminal: the owner ignored three consecutive offers (no accept, no
+   *  decline — declining is responsive). A lapsed bid receives no further
+   *  grants; re-entry requires an explicit fresh bid. The lapse records
+   *  facts, not motive — it never claims the participant departed.
+   *  (Trial FINDING-9; ruling by Mica 2026-08-13, K=3.) */
+  | 'lapsed';
 
 export interface Bid extends BidEnvelope {
   state: BidState;
+  /** Consecutive offers this bid's owner let expire unanswered. Cleared by
+   *  acceptance; untouched by decline (responsive); reset on replace. */
+  ignoredOffers: number;
 }
 
-/** §2.3 — a grant binds the exact bid revision it answers. */
+/** §2.3 — a grant binds the exact bid revision it answers.
+ *
+ *  Two clocks (trial FINDING-8; ruling by Mica 2026-08-13): the OFFER
+ *  carries an accept-TTL from issue; the SPEECH LEASE begins only when
+ *  acceptance is authoritatively logged. A timely accept receives the full
+ *  speech lease regardless of pre-accept relay delay; an unanswered offer
+ *  consumes only its accept-TTL, never a whole speech lease. */
 export interface Grant {
   grantId: string;
   roomId: string;
@@ -56,7 +71,12 @@ export interface Grant {
   bidRevision: number;
   processEpoch: string;
   grantedAt: number;
-  /** Positive, finite expiry — always (§2.3). */
+  /** Accept-TTL deadline, counted from offer issue. */
+  acceptBy: number;
+  /** Speech-lease duration applied at acceptance. */
+  speechLeaseMs: number;
+  /** The operative deadline — positive, finite, always (§2.3). Equals
+   *  acceptBy while offered; becomes acceptedAt + speechLeaseMs on accept. */
   leaseUntil: number;
   state: 'offered' | 'accepted' | 'terminal';
 }
@@ -65,7 +85,10 @@ export type TerminalState =
   | 'completed'
   | 'released'
   | 'revoked'
-  | 'expired'
+  /** Never accepted: the offer's accept-TTL elapsed. */
+  | 'offer-expired'
+  /** Accepted, then the holder failed to finish/release within the lease. */
+  | 'lease-expired'
   | 'declined';
 
 /** §2.3 — idempotent terminal receipt, deduped by grantId, safe to re-send. */
@@ -117,6 +140,7 @@ export interface FloorEvent {
     | 'binding/claimed'
     | 'contract/changed'
     | 'bid/created'
+    | 'bid/replaced'
     | 'bid/amended'
     | 'bid/cancelled'
     | 'bid/staled'
@@ -127,7 +151,15 @@ export interface FloorEvent {
     | 'grant/continued'
     | 'grant/released'
     | 'grant/revoked'
-    | 'grant/expired'
+    | 'grant/offer-expired'
+    | 'grant/lease-expired'
+    | 'bid/lapsed'
+    /** Telemetry, not control (FINDING-10, N=3): three consecutive offer
+     *  expiries with no intervening acceptance. Emitted once per episode;
+     *  the next acceptance emits book/recovered. Never alters fairness,
+     *  blocks bids, or falsifies floor/idle. */
+    | 'book/degraded'
+    | 'book/recovered'
     | 'book/restated'
     | 'acknowledged';
   data: Record<string, unknown>;

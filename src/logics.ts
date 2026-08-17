@@ -16,8 +16,11 @@ export interface GrantDecision {
   kind: 'grant';
   bidId: string;
   bidRevision: number;
-  /** Lease duration in ms from now; the service computes leaseUntil. */
-  leaseMs: number;
+  /** Offer accept-TTL in ms from now; the service computes acceptBy.
+   *  (FINDING-8: the offer clock is not the speech clock.) */
+  acceptTtlMs: number;
+  /** Speech-lease duration applied when acceptance is logged. */
+  speechLeaseMs: number;
 }
 
 export interface HoldDecision {
@@ -45,35 +48,102 @@ export interface Logic {
 export class FluidFairnessLogic implements Logic {
   readonly contract: LogicContract;
   private lastHeld = new Map<string, number>();
-  private readonly leaseMs: number;
+  /** Consecutive lease expiries per participant; cleared by any responsive
+   *  terminal (release/decline/revoke). Trial FINDING-1: an expired grant
+   *  consumed the scarce resource too — it must charge fairness history, and
+   *  a repeatedly-unresponsive bidder must not recapture the floor forever. */
+  private strikes = new Map<string, number>();
+  private lastExpiredAt = new Map<string, number>();
+  private readonly speechLeaseMs: number;
+  private readonly acceptTtlMs: Record<import('./types.js').ReadinessKind, number>;
+  private readonly expiryBackoffMs: number;
+  private readonly expiryBackoffCapMs: number;
 
-  constructor(opts?: { leaseMs?: number; knobs?: Record<string, unknown> }) {
-    this.leaseMs = opts?.leaseMs ?? 30_000;
+  constructor(opts?: {
+    /** Speech-lease duration, counted FROM ACCEPTANCE (FINDING-8; Mica
+     *  2026-08-13: 30s retained, moved to acceptance — 10s rejected, 60s
+     *  showed no throughput gain). `leaseMs` is the legacy alias. */
+    speechLeaseMs?: number;
+    leaseMs?: number;
+    /** Offer accept-TTLs per declared readiness kind, set from measured
+     *  relay latency with margin (phase-2 sweep: sustained median
+     *  offer→accept ≈10s on the portal relay, min ~1.5s). prepared implies
+     *  fast; intent gets the median plus margin; manual is a human. */
+    acceptTtlMs?: Partial<Record<import('./types.js').ReadinessKind, number>>;
+    expiryBackoffMs?: number;
+    expiryBackoffCapMs?: number;
+    knobs?: Record<string, unknown>;
+  }) {
+    this.speechLeaseMs = opts?.speechLeaseMs ?? opts?.leaseMs ?? 30_000;
+    this.acceptTtlMs = {
+      prepared: 15_000,
+      intent: 20_000,
+      urgent: 15_000,
+      manual: 60_000,
+      ...(opts?.acceptTtlMs ?? {}),
+    };
+    this.expiryBackoffMs = opts?.expiryBackoffMs ?? this.speechLeaseMs * 2;
+    this.expiryBackoffCapMs = opts?.expiryBackoffCapMs ?? this.speechLeaseMs * 8;
     this.contract = {
       logicId: 'fluid-fairness',
-      version: 1,
+      version: 3,
       bidFields: {
         readinessKind: 'intent | prepared | urgent',
         subjectRef: 'optional — what the turn answers',
       },
       queueVisibility: 'full',
-      eventShapes: ['floor:grant', 'floor:hold', 'floor:state'],
+      eventShapes: ['floor:grant', 'floor:hold', 'floor:state', 'floor:idle'],
       api: [],
-      knobs: { leaseMs: this.leaseMs, ...(opts?.knobs ?? {}) },
+      knobs: {
+        speechLeaseMs: this.speechLeaseMs,
+        acceptTtlMs: { ...this.acceptTtlMs },
+        lapseAfterIgnoredOffers: 3,
+        degradedAfterNoAcceptStreak: 3,
+        expiryBackoffMs: this.expiryBackoffMs,
+        expiryBackoffCapMs: this.expiryBackoffCapMs,
+        ...(opts?.knobs ?? {}),
+      },
       moderation: [],
     };
   }
 
   noteTerminal(participantId: string, at: number): void {
     this.lastHeld.set(participantId, at);
+    this.strikes.delete(participantId); // a responsive terminal clears strikes
+  }
+
+  /** An expired lease charges held-history AND accrues a strike: backoff
+   *  doubles per consecutive expiry, bounded by expiryBackoffCapMs. */
+  noteExpired(participantId: string, at: number): void {
+    this.lastHeld.set(participantId, at);
+    this.strikes.set(participantId, (this.strikes.get(participantId) ?? 0) + 1);
+    this.lastExpiredAt.set(participantId, at);
+  }
+
+  private eligible(participantId: string, now: number): boolean {
+    const s = this.strikes.get(participantId);
+    if (!s) return true;
+    const backoff = Math.min(this.expiryBackoffCapMs, this.expiryBackoffMs * 2 ** (s - 1));
+    return now >= (this.lastExpiredAt.get(participantId) ?? 0) + backoff;
   }
 
   decide(book: FloorBook, now: number): LogicDecision {
     if (book.liveGrant) return { kind: 'hold', reason: 'floor occupied' };
     const open = book.openBids();
     if (open.length === 0) return { kind: 'hold', reason: 'no open bids' };
+    // Expiry backoff DOWNRANKS (antra 2026-08-11: "downrank them for the
+    // next few rounds"): in any contested round a struck bidder loses to
+    // every eligible competitor. When even the round's best bid is in
+    // backoff (a solo unresponsive bidder), the round HOLDS for the bounded
+    // cooldown instead of granting — immediate regrant would churn
+    // grant/expire cycles at a non-responder and keep the floor nominally
+    // occupied, suppressing the open-floor idle signal standing-ready
+    // participants depend on.
     const pick = (candidates: Bid[]): Bid =>
       candidates.slice().sort((a, b) => {
+        const ea = this.eligible(a.participantId, now) ? 0 : 1;
+        const eb = this.eligible(b.participantId, now) ? 0 : 1;
+        if (ea !== eb) return ea - eb; // eligible before backed-off
         const ha = this.lastHeld.get(a.participantId) ?? -1;
         const hb = this.lastHeld.get(b.participantId) ?? -1;
         if (ha !== hb) return ha - hb; // least-recently-held first; never-held (-1) wins
@@ -81,7 +151,16 @@ export class FluidFairnessLogic implements Logic {
       })[0];
     const urgent = open.filter((b) => b.readinessKind === 'urgent');
     const chosen = urgent.length > 0 ? pick(urgent) : pick(open);
-    return { kind: 'grant', bidId: chosen.bidId, bidRevision: chosen.revision, leaseMs: this.leaseMs };
+    if (!this.eligible(chosen.participantId, now)) {
+      return { kind: 'hold', reason: 'best bid cooling down after lease expiry' };
+    }
+    return {
+      kind: 'grant',
+      bidId: chosen.bidId,
+      bidRevision: chosen.revision,
+      acceptTtlMs: this.acceptTtlMs[chosen.readinessKind],
+      speechLeaseMs: this.speechLeaseMs,
+    };
   }
 }
 

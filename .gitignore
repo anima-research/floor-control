@@ -1,3 +1,6 @@
 node_modules/
 dist/
 .DS_Store
+trial/runs/
+trial/creds/
+trial/rig.json

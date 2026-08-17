@@ -84,10 +84,29 @@ export class FloorService {
    *  logic to grant — bids cannot self-grant. */
   arbitrate(roomId: string, now: number): { decision: LogicDecision; grant?: Grant } {
     const room = this.mustRoom(roomId);
+    const preTick = room.book.liveGrant;
     room.book.tick(now);
+    // An expiry under the tick consumed the floor too: charge the holder's
+    // fairness history and strike count (FINDING-1 — without this, the
+    // reopened bid stays "never held" and recaptures the floor forever).
+    // Both expiry terminals count: an ignored offer and an overrun lease
+    // each wasted the scarce resource (FINDING-8 split the clocks, not the
+    // accountability).
+    if (preTick && !room.book.liveGrant) {
+      const receipt = room.book.receiptFor(preTick.grantId);
+      if ((receipt?.terminal === 'offer-expired' || receipt?.terminal === 'lease-expired')
+          && room.logic instanceof FluidFairnessLogic) {
+        room.logic.noteExpired(preTick.participantId, now);
+      }
+    }
     const decision = room.logic.decide(room.book, now);
     if (decision.kind === 'grant') {
-      const grant = room.book.offerGrant(decision.bidId, decision.bidRevision, now + decision.leaseMs, now);
+      const grant = room.book.offerGrant(
+        decision.bidId,
+        decision.bidRevision,
+        { acceptBy: now + decision.acceptTtlMs, speechLeaseMs: decision.speechLeaseMs },
+        now,
+      );
       return { decision, grant };
     }
     return { decision };
@@ -109,6 +128,34 @@ export class FloorService {
     return receipt;
   }
 
+  /** Acceptance through the service, so terminal bookkeeping has one owner
+   *  (Mica delta review 2026-08-13). A timely accept starts the speech
+   *  lease. A LATE accept is refused explicitly by the book — and charges
+   *  the same fairness history/strike as any other offer-expiry, exactly
+   *  once: without this, the late/jitter path from FINDING-8 would bypass
+   *  FINDING-1's repair and the refused bidder could be re-granted one
+   *  arbitration later. The following pump cannot double-charge — by the
+   *  time it runs, the grant is already terminal, so arbitrate's
+   *  offered→expired observation never fires for it. */
+  accept(roomId: string, grantId: string, now: number): Grant {
+    const room = this.mustRoom(roomId);
+    const holder = room.book.liveGrant;
+    try {
+      return room.book.acceptGrant(grantId, now);
+    } catch (err) {
+      if (
+        holder &&
+        holder.grantId === grantId &&
+        (err as Error).message.startsWith('late accept refused') &&
+        room.book.receiptFor(grantId)?.terminal === 'offer-expired' &&
+        room.logic instanceof FluidFairnessLogic
+      ) {
+        room.logic.noteExpired(holder.participantId, now);
+      }
+      throw err;
+    }
+  }
+
   decline(roomId: string, grantId: string, now: number, reason?: string): Receipt {
     const room = this.mustRoom(roomId);
     const grant = room.book.liveGrant;
@@ -123,10 +170,22 @@ export class FloorService {
    *  the active contract's chairId knob; the book's invariants (one live
    *  grant, exact revision, positive expiry) apply unchanged — a chair is
    *  powerful, not exempt. */
-  chairGrant(roomId: string, actorId: string, bidId: string, bidRevision: number, leaseMs: number, now: number): Grant {
+  chairGrant(
+    roomId: string,
+    actorId: string,
+    bidId: string,
+    bidRevision: number,
+    timing: { acceptTtlMs: number; speechLeaseMs: number },
+    now: number,
+  ): Grant {
     const room = this.mustRoom(roomId);
     this.mustBeChair(room, actorId);
-    return room.book.offerGrant(bidId, bidRevision, now + leaseMs, now);
+    return room.book.offerGrant(
+      bidId,
+      bidRevision,
+      { acceptBy: now + timing.acceptTtlMs, speechLeaseMs: timing.speechLeaseMs },
+      now,
+    );
   }
 
   chairRevoke(roomId: string, actorId: string, grantId: string, now: number, reason?: string): Receipt {
