@@ -38,7 +38,10 @@ export class LoopbackBus {
   private counter = 0;
   readonly log: InboundMessage[] = [];
 
-  post(authorId: string, authorName: string, surface: 'room' | 'control', text: string): string {
+  // `at` is overridable because stamped-time and delivery-time genuinely
+  // diverge on real transports (relay redelivery carries the original
+  // timestamp) — and the host must stay honest under that divergence.
+  post(authorId: string, authorName: string, surface: 'room' | 'control', text: string, at?: number): string {
     this.counter += 1;
     const m: InboundMessage = {
       authorId,
@@ -46,7 +49,7 @@ export class LoopbackBus {
       surface,
       messageId: `m${this.counter}`,
       text,
-      at: Date.now(),
+      at: at ?? Date.now(),
     };
     this.log.push(m);
     // Deliver async so senders never re-enter their own handler stack.

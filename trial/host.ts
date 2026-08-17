@@ -50,6 +50,16 @@ export class FloorRoomHost {
    *  recorded — a genuinely quiet room must not get a periodic wake source
    *  out of its liveness primitive (Mica, 2026-08-11). */
   private idleArmed = true;
+  /** Liveness is processing-order, not timestamp-order. Message stamps are
+   *  receipts of when a thing was said; the transition the idle machinery
+   *  cares about is when the host processed it. Comparing stamps to the tick
+   *  clock silently swallows a genuine join whose stamp ties with (or, via
+   *  redelivery, precedes) the last emission — the room then never re-arms
+   *  and a newcomer waits forever (Mica's S6 2/12 reproduction, 2026-08-17).
+   *  So re-arm rides these monotonic counters; timestamps stay for quietMs
+   *  receipts only. */
+  private activitySeq = 0;
+  private idleSeenSeq = 0;
   idleEmissions = 0;
   readonly idleRearms: Array<{ at: number; cause: string }> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -102,6 +112,7 @@ export class FloorRoomHost {
       this.lastRoomMessageId = m.messageId;
       this.lastActivityAt = m.at;
       this.lastActivityCause = 'speech';
+      this.activitySeq += 1;
       this.audit(m);
       this.pump();
       return;
@@ -137,6 +148,7 @@ export class FloorRoomHost {
         if (firstJoin) {
           this.lastActivityAt = now;
           this.lastActivityCause = 'participant/joined';
+          this.activitySeq += 1;
         }
         void this.transport.sendControl(
           eventLine('joined', {
@@ -287,8 +299,10 @@ export class FloorRoomHost {
     if (this.book.liveGrant) return;
     if (!this.idleArmed) {
       // Disarmed after emitting: only a liveness transition re-arms, and the
-      // cause goes in the ledger.
-      if (this.lastActivityAt > this.lastIdleAt) {
+      // cause goes in the ledger. The comparison is sequence, not timestamp —
+      // a transition the host processed after the emission re-arms even when
+      // its stamp says otherwise (see activitySeq above).
+      if (this.activitySeq > this.idleSeenSeq) {
         this.idleArmed = true;
         this.idleRearms.push({ at: now, cause: this.lastActivityCause });
         this.ledger({ kind: 'idle-rearm', at: now, cause: this.lastActivityCause });
@@ -297,6 +311,7 @@ export class FloorRoomHost {
     }
     if (now - Math.max(this.lastActivityAt, this.lastIdleAt) < idleAfter) return;
     this.lastIdleAt = now;
+    this.idleSeenSeq = this.activitySeq;
     this.idleArmed = false;
     this.idleEmissions += 1;
     this.ledger({ kind: 'idle', at: now, quietMs: now - this.lastActivityAt });
@@ -316,6 +331,7 @@ export class FloorRoomHost {
       if (e.type !== 'grant/offered' && e.type !== 'grant/offer-expired' && e.type !== 'grant/lease-expired') {
         this.lastActivityAt = e.at;
         this.lastActivityCause = e.type;
+        this.activitySeq += 1;
       }
       this.ledger({ kind: 'event', ...e });
       const mention =
