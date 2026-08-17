@@ -1,18 +1,26 @@
 /**
  * Portal transport — the two surfaces over the live relay.
  *
- * Two relay realities discovered empirically (probe, 2026-08-11) shape this
- * implementation; both differ from the published protocol docs:
+ * History note: this file originally carried two workarounds for relay
+ * realities probed on 2026-08-11 (persona sends echoing back as webhook
+ * users; `threadId` absent on all deliveries — portal#17/#18). Both were
+ * fixed at the relay in portal PR #19, deployed 2026-08-17, and field-
+ * canaried the same evening. What remains here is the post-#19 shape:
  *
- * 1. Persona sends echo back as webhook USERS (`kind:"user"`, `bot:true`,
- *    stable webhook userId, username = persona display name) — never as
- *    `kind:"persona"`. Self-filtering therefore matches on our own sent
- *    relay-message ids (primary) and the webhook-echo name shape (fallback).
- * 2. `threadId` is ABSENT on delivered messages even when they live in a
- *    thread, so surfaces cannot be told apart by thread. Bands are
- *    classified by SYNTAX instead: `!floor …` and `⟨floor⟩ …` lines are
- *    control traffic wherever they appear; everything else is room speech.
- *    Control is still SENT to the thread for human readability.
+ * 1. Self-filtering matches our own sent relay-message ids (primary) and
+ *    our own personaId on delivered echoes (the relay now attributes owned
+ *    webhook echoes as `kind:"persona"`, including through the send race).
+ * 2. Surface classification is container-first: traffic in the control
+ *    thread is control. The `!floor …` / `⟨floor⟩ …` prefix rule is kept
+ *    as a HUMAN-TOLERANCE rule, not a relay workaround — a person typing
+ *    `!floor join` in the room channel still reaches the arbiter. Traffic
+ *    in unrelated threads under the room channel is not the room's.
+ * 3. The `webhook:` name-keyed identity survives only as a last resort for
+ *    authors the relay itself cannot attribute (foreign webhooks; personas
+ *    with ambiguous displayNames, which the relay declines to guess). It
+ *    keeps the collision-refusing fingerprint: the same derived id arriving
+ *    with a different underlying shape is dropped and reported, never
+ *    silently merged.
  *
  * Sends are hardened: one retry, then log-and-drop — a single RPC timeout
  * must never become an unhandled rejection that kills the arbiter (that is
@@ -46,10 +54,10 @@ export class PortalTransport implements RoomTransport {
   private client: PortalClient;
   private handlers: Array<(m: InboundMessage) => void> = [];
   private sentIds = new Set<string>();
-  /** Derived participantId → first-seen raw fingerprint. Name-keyed identity
-   *  is only tolerable while it is COLLISION-REFUSING: the same derived id
-   *  arriving with a different underlying shape is dropped and reported,
-   *  never silently merged (Mica's caution; portal#18 is the real fix). */
+  /** Our own persona id — id-shaped self-filtering for delivered echoes. */
+  private readonly personaId: string;
+  /** Derived participantId → first-seen raw fingerprint, for the residual
+   *  `webhook:` last-resort identities only (see header note 3). */
   private fingerprints = new Map<string, string>();
 
   constructor(private opts: PortalTransportOptions) {
@@ -57,6 +65,7 @@ export class PortalTransport implements RoomTransport {
       personaId: string;
       token: string;
     };
+    this.personaId = creds.personaId;
     this.locator = `portal://${opts.roomChannelId}`;
     this.provenance = `portal-relay:${new URL(opts.url).host}`;
     this.client = new PortalClient({
@@ -66,61 +75,8 @@ export class PortalTransport implements RoomTransport {
       subscriptions: [opts.roomChannelId],
     });
     this.client.on('message', ({ message: m }) => {
-      if (m.channelId !== this.opts.roomChannelId) return;
-      if (this.sentIds.has(m.id)) return; // own send, echoed back
-      const author = m.author as {
-        kind: string;
-        personaId?: string;
-        userId?: string;
-        displayName?: string;
-        username?: string;
-        bot?: boolean;
-      };
-      // Webhook-echo fallback: our own name coming back as a bot user. Covers
-      // the race where the echo lands before sendMessage resolves with its id.
-      if (author.bot === true && (author.username === this.opts.personaName || author.displayName === this.opts.personaName)) {
-        return;
-      }
-      // Identity, third relay reality: ONE webhook serves the whole channel,
-      // so webhook userId is per-CHANNEL, not per-persona — using it collapsed
-      // every persona into a single participant (first live ledger, grants
-      // g1–g5). For webhook echoes the only per-persona field the relay
-      // delivers is the display name it stamps from the persona record; use
-      // it, and flag the caveat until deliveries carry personaId.
-      const authorId =
-        author.kind === 'persona'
-          ? `persona:${author.personaId}`
-          : author.bot
-            ? `webhook:${author.username ?? author.displayName}`
-            : `user:${author.userId}`;
-      const raw = {
-        relayMessageId: m.id,
-        kind: author.kind,
-        userId: author.userId,
-        personaId: author.personaId,
-        username: author.username,
-        displayName: author.displayName,
-        bot: author.bot,
-      };
-      const fp = `${author.kind}|${author.bot ? 'bot' : 'user'}|${author.kind === 'user' && !author.bot ? author.userId : ''}`;
-      const seen = this.fingerprints.get(authorId);
-      if (seen === undefined) {
-        this.fingerprints.set(authorId, fp);
-      } else if (seen !== fp) {
-        this.opts.onAnomaly?.({ kind: 'identity-refusal', at: Date.now(), authorId, expected: seen, got: fp, raw });
-        return; // explicit refusal, never a silent merge
-      }
-      const text = m.content ?? '';
-      const surface = CONTROL_PREFIXES.some((p) => text.startsWith(p)) ? ('control' as const) : ('room' as const);
-      const msg: InboundMessage = {
-        authorId,
-        authorName: author.displayName ?? author.username ?? authorId,
-        surface,
-        messageId: m.nativeId,
-        text,
-        at: Date.parse(m.createdAt),
-        raw,
-      };
+      const msg = this.toInbound(m);
+      if (!msg) return;
       this.handlers.forEach((h) => {
         try {
           h(msg);
@@ -129,6 +85,87 @@ export class PortalTransport implements RoomTransport {
         }
       });
     });
+  }
+
+  /** Classify one relay delivery into the trial's inbound shape, or null for
+   *  traffic that is not the room's (own echoes, unrelated threads, refused
+   *  identities). Extracted so the classification is testable without a
+   *  relay connection. */
+  toInbound(m: {
+    id: string;
+    nativeId: string;
+    channelId: string;
+    threadId?: string;
+    content?: string;
+    createdAt: string;
+    author: unknown;
+  }): InboundMessage | null {
+    if (m.channelId !== this.opts.roomChannelId) return null;
+    // A thread under the room channel that is not the control thread is some
+    // other conversation, not the room's traffic.
+    if (m.threadId && m.threadId !== this.opts.controlThreadId) return null;
+    if (this.sentIds.has(m.id)) return null; // own send, echoed back
+    const author = m.author as {
+      kind: string;
+      personaId?: string;
+      userId?: string;
+      displayName?: string;
+      username?: string;
+      bot?: boolean;
+    };
+    // Id-shaped self-filter: the relay attributes owned webhook echoes as
+    // kind:"persona" even when the echo beats the send RPC (portal#19), so
+    // our own personaId is sufficient — no name-shape matching.
+    if (author.kind === 'persona' && author.personaId === this.personaId) return null;
+    // A persona author without a personaId is a shape the relay should never
+    // emit; treat it as unattributed rather than minting "persona:undefined".
+    const authorId =
+      author.kind === 'persona' && author.personaId
+        ? `persona:${author.personaId}`
+        : author.bot
+          ? `webhook:${author.username ?? author.displayName}`
+          : `user:${author.userId}`;
+    const raw = {
+      relayMessageId: m.id,
+      kind: author.kind,
+      userId: author.userId,
+      personaId: author.personaId,
+      username: author.username,
+      displayName: author.displayName,
+      bot: author.bot,
+      threadId: m.threadId,
+    };
+    // Collision refusal for the residual name-keyed identities: same derived
+    // id, different underlying shape → dropped and reported, never merged.
+    if (authorId.startsWith('webhook:')) {
+      const fp = `${author.kind}|${author.bot ? 'bot' : 'user'}`;
+      const seen = this.fingerprints.get(authorId);
+      if (seen === undefined) {
+        this.fingerprints.set(authorId, fp);
+      } else if (seen !== fp) {
+        this.opts.onAnomaly?.({ kind: 'identity-refusal', at: Date.now(), authorId, expected: seen, got: fp, raw });
+        return null;
+      }
+    }
+    const text = m.content ?? '';
+    // Container-first classification; prefixes kept as human tolerance so a
+    // person typing `!floor join` in the room channel still reaches the
+    // arbiter (the invitation says "in the control thread" — people won't).
+    const surface =
+      m.threadId === this.opts.controlThreadId && this.opts.controlThreadId
+        ? ('control' as const)
+        : CONTROL_PREFIXES.some((p) => text.startsWith(p))
+          ? ('control' as const)
+          : ('room' as const);
+    return {
+      authorId,
+      authorName: author.displayName ?? author.username ?? authorId,
+      surface,
+      messageId: m.nativeId,
+      text,
+      at: Date.parse(m.createdAt),
+      raw,
+    };
   }
 
   async connect(): Promise<void> {
