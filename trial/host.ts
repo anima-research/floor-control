@@ -89,6 +89,15 @@ export class FloorRoomHost {
         hint: '!floor_join_to_participate',
       }),
     );
+    // Humans live in the room channel, not the control thread — from there a
+    // freshly (re)started arbiter is indistinguishable from a dead one, and
+    // ops sent into a restart gap vanish without trace (observed 2026-08-18:
+    // a join+speech landed in the seven minutes between epoch stop and
+    // relaunch). The banner marks, in the humans' band, the exact moment
+    // listening begins; anything you sent before it, the floor never heard.
+    void this.transport.sendRoom(
+      `floor service listening from this message onward (${c.contract.logicId} epoch ${c.logicEpoch}) — \`!floor join\` to participate; ops sent while the service was down were not seen.`,
+    );
   }
 
   stop(): void {

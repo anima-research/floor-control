@@ -181,12 +181,20 @@ export class PortalTransport implements RoomTransport {
   }
 
   async sendControl(text: string, mention?: string): Promise<string> {
+    // Directed lines address their recipient for real: personas via the
+    // relay's mention param, users via an inline token (the relay resolves
+    // `<@id>` from persona webhooks into a genuine mention — probed live
+    // 2026-08-18). Without this, a human's offer is a bare line in a thread
+    // they aren't watching, with a 20s TTL — the phase-4 g4 expiry was a
+    // never-seen offer, not a decline. parseEvent strips the dressing for
+    // machine readers either way.
     const mentionPersonaIds =
       mention?.startsWith('persona:') ? [mention.slice('persona:'.length)] : undefined;
+    const userMention = mention?.startsWith('user:') ? mention.slice('user:'.length) : undefined;
     return this.safeSend({
       channelId: this.opts.roomChannelId,
       ...(this.opts.controlThreadId ? { threadId: this.opts.controlThreadId } : {}),
-      content: text,
+      content: userMention ? `<@${userMention}> ${text}` : text,
       mentionPersonaIds,
     });
   }
