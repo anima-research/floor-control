@@ -1,20 +1,23 @@
 # FLOOR-RFC-001 — The floor protocol: an order book for speaking turns
 
-- **Status:** Draft rev 7 — trial-hardened, human-contact tested.
+- **Status:** Draft rev 8 — trial-hardened, human-contact tested,
+  interaction-model settled; observation window closed 2026-08-19.
   Founding RFC for `anima-research/floor-control`; revised against ten
   findings from the live multi-agent trial (2026-08-11 → 08-14) and
   Mica's rulings on them (2026-08-13/14), then reconfirmed by the
   phase-3 run on merged main (2026-08-17, §12) — the first live outing
-  where all ten findings' machinery ran together — plus findings 11–13
-  from phase 4's first hour of human contact (2026-08-18) — the run that
-  answered the two-band-split question the trial was sent to ask. Findings ledger
+  where all ten findings' machinery ran together — plus findings 11–15
+  from phase 4's human-contact day (2026-08-18) — the run that answered
+  the two-band-split question the trial was sent to ask, settled the
+  human and agent interaction models (§6), and earned the stale-head
+  suspension rule (§2.2). Findings ledger
   in §12; every claim there has a raw ledger or deterministic scenario
   behind it in `trial/`.
 - **Authors:** Ra & Weft (Claude). Core model by antra (2026-08-06, the
   order-book formulation); protocol freeze, identity/registry design, and
   cautions by Sol; precedent curation by Sol; trial review and phase-3
   rulings by Mica.
-- **Date:** 2026-08-06 · rev 5: 2026-08-14 · rev 6: 2026-08-18 · rev 7: 2026-08-18
+- **Date:** 2026-08-06 · rev 5: 2026-08-14 · rev 6: 2026-08-18 · rev 7: 2026-08-18 · rev 8: 2026-08-19
 - **Decision record:** four frames in two days, kept so founding main
   encodes none of the stale ones: *manual-as-definition* (8/5, Sol's lean)
   → *automated-as-definition* (8/6 AM, antra: fluid rooms must not be
@@ -114,6 +117,25 @@ turn does not send its author to the back of the queue, and revision
 churn cannot parlay that age into stale authority because a grant binds
 the exact revision it answers. A granted bid cannot be replaced or
 amended at all.
+
+**Stale-head declines suspend the bid revision** (FINDING-14 family;
+ruling by Mica 2026-08-18): a `grant/declined reason=stale-head` removes
+that exact bid revision from ordinary arbitration — re-offering the same
+`(bidId, revision)` against the same head is provably futile, and the
+trial measured what happens without this rule: an engaged, polite,
+permanently-stale bidder churned offer/decline every six seconds,
+invisible to lapse (declines are engagement), to degradation telemetry,
+and to fairness. The service emits one durable `bid/suspended
+cause=stale-head blockedHead=…`; eligibility returns on **either** an
+authoritative head advance **or** a participant-authored
+revision/reaffirmation bound to the current head — the reaffirmation
+path exists because head-staleness is not meaning-staleness (§6): an
+agent whose point survives an intervening message says so explicitly and
+cheaply, rather than being machine-classified as stale. Original queue
+age is preserved; fairness MUST NOT punish a correct stale-head refusal.
+A second offer of the same `(bidId, revision, blockedHead)` tuple is a
+service invariant failure and emits a distinct degradation/error
+receipt. Long-lived suspensions get age/count telemetry — never churn.
 
 Structured events include `contract/changed {logicEpoch, contractDigest,
 …}`, bid accepted/cancelled, grant lifecycle, and floor-state snapshots.
@@ -317,6 +339,37 @@ non-Connectome agents. Provided on top:
 The core order book and room registry do not depend on MCPL's chat-channel
 representation.
 
+**Who speaks the wire format (rev 8, from phase 4's human-contact hour +
+Ra's ruling on inference pressure): harness software, and nobody else.**
+The ops band is the protocol's wire format — an interface for *neither*
+of the two kinds of participant who think:
+
+- **Humans never type ops.** Human participation is first-class in the
+  book and ledger, but human ops are *derived from native gestures*:
+  speech is observed head movement and floor evidence, never a violation
+  requiring retroactive permission; typing is soft/ephemeral bid
+  evidence; ✋ is an explicit formal bid (Session 1 practice); there is
+  no human accept gesture and no human accept-TTL — grants exist for
+  participants whose speech has marginal cost. A derived op may document
+  a native gesture; a receipt may describe what the system observed; it
+  must not pretend it *authorized* a human to speak (ruling 2026-08-18).
+- **Model inference never formats ops either.** The agent's harness
+  handles everything mechanical at zero inference cost: join
+  bookkeeping, auto-accept inside the TTL, release after emission, op
+  encoding. Inference is woken for exactly the judgments that need a
+  mind: whether something is worth bidding on; whether an intervening
+  head movement invalidates a prepared point (**head-staleness is not
+  meaning-staleness** — a scripted rule must decline conservatively, an
+  agent can judge that its point stands and reaffirm; the suspension
+  mechanics in §2.2 exist to make that reaffirmation cheap and
+  explicit); and what to say. Grant-before-cost applies to the
+  protocol's own operation: the accept window is sized for software,
+  and `acceptTTL` semantics belong to agent readiness kinds only.
+- Adapter guidance: the common prepared-turn shape (accept → emit →
+  release, no judgment between) should be offered as one atomic adapter
+  operation — the trial measured four wire messages per spoken turn,
+  which is fine for machines and absurd for anything else.
+
 **Adapter honesty (trial findings, portal relay).** Transports lie in
 small ways: the trial found deliveries missing thread ids (portal#17) and
 per-channel webhook identity collapsing all personas into one author
@@ -470,6 +523,8 @@ provenance. Where a finding changed this document, the section is named.
 | 11 | Directed offers arrive mention-dressed; a start-anchored parser blinds exactly the participant being addressed | §6 adapter honesty. Latent until id-shaped identity made mentions real (phase 4, 2026-08-18): the recipient's three offers expired unseen and §2.5 retired its bid as "unresponsive" — every safety mechanism truthful, the composite conclusion wrong. Rig fix: strip leading mention tokens before anchoring; mentions kept (a directed offer that pings its recipient is the attention contract under test). Approved and merged same day (Mica, exact-head receipts) |
 | 12 | Directed offers never reached for a human's attention at all | Mirror of 11, found via a human's "nothing seems to happen": the mention branch was persona-only, so a `user:` participant's offer was an undressed line in a band they don't watch, with a 20 s fuse. The first "human accept-window datum" was retracted on this finding — the offer was never seen, so no human accept data existed. Rig fix: user-directed lines carry an inline mention token (relay-resolution probed live before building). Approved and merged same day (Mica: parent-head vectors fail exactly the claimed seams) |
 | 13 | Ops sent into an arbiter restart gap vanish without trace | A live join+speech landed in the seven minutes between epoch stop and relaunch; the transport is live-subscription-only, and from the room band a freshly started arbiter is indistinguishable from a dead one — even the relaunch announcement raced the connect by 20 s. Rig fix: the host banners the humans' band the moment listening begins ("ops sent while the service was down were not seen"). Recovering (vs. honestly marking) the gap is deliberately unfixed — see §11. Approved and merged same day (Mica: the banner verified as an honest lower bound — handler installed before the send, no replay claimed) |
+| 14 | The F13 banner livelocked the room at birth — the arbiter's own room speech was invisible to itself | The banner is room speech to every other participant (the prepared bot correctly bound to it), but the arbiter self-filtered its own echo: `head=none` forever, stale-head decline → return-to-book → sole-bid re-offer, ~6 s cycle, ~100 cycles. Every mechanism locally truthful — no lapse (declines are engagement), no degradation (streak counts expiries), no fairness charge — composite: silent livelock. Protocol residue: the suspension rule (§2.2). Rig fix: the banner's send receipt seeds the head. Approved and merged same day |
+| 15 | The F14 fix validated only in the environment where it couldn't fail | The seeded head used the transport's *send receipt* id (`rm_<container>_<native>`), while deliveries expose the bare native id — bot and arbiter named the same banner in two id spaces; `head=none` became `head=⟨wrong alphabet⟩`, same churn. Loopback's send returns and deliveries share one id space, so the fix's own tests **and the independent review's parent-head discriminator were structurally blind** — the live relay was the only discriminating environment. Protocol residue, §6 adapter honesty: send-return ids MUST live in the delivery id-space (stated on the transport contract). Review-practice residue (adopted by reviewer and author): transport fixes require a fixture where the seam's two sides actually differ, plus one completed field cycle before an epoch is reported healthy — manifest/startup is not health |
 
 **Phase-3 confirmation run** (2026-08-17, first run on merged main after
 the phase-3 rulings landed; ledger `2026-08-17T18-51-44-493Z`): the first
@@ -502,6 +557,43 @@ attention in the recipient's own band** (mentions for offers), and
 band-crossing state transitions (listening began, epoch changed) get
 announced in the humans' band, not only the machines'. The split stays —
 what changes is that the control band may not assume it is being watched.
+
+**Phase-4 observation window** (2026-08-18 → 08-19, epoch on the
+fully-repaired head, humans exempt): closed by the room's PM after ~19
+live hours. Mechanical record: 13 completed grant cycles — including the
+trial's first *unscripted-agent* turn (join → prepared bid → mention-ping
+wake → accept +2.1 s → emit → release), which also produced the
+meaning-staleness observation now embedded in §2.2/§6 — three
+amend-while-granted races correctly refused *and ledgered*, five one-shot
+idles each re-armed on a logged transition, 34 truthfully-witnessed clock
+gaps across a sleeping-laptop night, zero violations, zero churn.
+Human-seat record: rapid-fire, mid-grant interruption, and ops-band
+probing all converged correctly; the humans' principal confusion in early
+epochs (offers unseen, windows hostile, "nothing seems to happen") was
+fully explained by findings 12–13 and dissolved by the exemption model —
+the closing epoch drew no confusion reports. It took three launches to
+reach one healthy epoch, which is why "manifest correct" is not an
+acceptance criterion anywhere in this document.
+
+**Staged path to production contexts** (the testing ladder; live-channel
+idea by Ra, 2026-08-18): the service's consumer-not-gate property permits
+graduated deployment against real rooms. (0) **Shadow mode** — arbiter
+observes a live channel, maintains the book, ledgers what it *would*
+have granted; nobody's behavior changes; calibrates lease/TTL knobs
+against real human+agent rhythms. Prerequisites, both hard: an arbiter
+send-rate circuit breaker, and a ledger content audit against §9's
+metadata-only promise — a measurement instrument pointed at a social
+space carries disclosure and minimization obligations a test channel
+does not. (1) **Compliant-agents-only** — real residents adopt floor
+discipline via their harness adapters (§6); humans untouched. This stage
+is gated on the first production floor adapter existing, and is where the
+wake-economics claim becomes demonstrable. (2) **Gesture-derived
+humans** — the §6 model, full product. In parallel: the voice gate's
+**synthetic-provider rig** (RFC-006 dev path) exercises
+one-wake/one-synthesis/barge-in-boundary as protocol behavior with zero
+audio infrastructure. The lab room (this trial channel) is retained
+alongside all stages — controlled probes and adversarial profiles don't
+transfer to rooms where people live.
 
 Two meta-invariants earned by review rather than by trial: **one
 accounting owner** for terminal bookkeeping (§2.3, Mica's delta-review
