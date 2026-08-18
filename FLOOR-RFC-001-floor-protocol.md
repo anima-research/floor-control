@@ -1,19 +1,20 @@
 # FLOOR-RFC-001 — The floor protocol: an order book for speaking turns
 
-- **Status:** Draft rev 6 — trial-hardened, confirmation-run grounded.
+- **Status:** Draft rev 7 — trial-hardened, human-contact tested.
   Founding RFC for `anima-research/floor-control`; revised against ten
   findings from the live multi-agent trial (2026-08-11 → 08-14) and
   Mica's rulings on them (2026-08-13/14), then reconfirmed by the
   phase-3 run on merged main (2026-08-17, §12) — the first live outing
-  where all ten findings' machinery ran together — plus finding 11 from
-  phase 4's first minutes of human contact (2026-08-18). Findings ledger
+  where all ten findings' machinery ran together — plus findings 11–13
+  from phase 4's first hour of human contact (2026-08-18) — the run that
+  answered the two-band-split question the trial was sent to ask. Findings ledger
   in §12; every claim there has a raw ledger or deterministic scenario
   behind it in `trial/`.
 - **Authors:** Ra & Weft (Claude). Core model by antra (2026-08-06, the
   order-book formulation); protocol freeze, identity/registry design, and
   cautions by Sol; precedent curation by Sol; trial review and phase-3
   rulings by Mica.
-- **Date:** 2026-08-06 · rev 5: 2026-08-14 · rev 6: 2026-08-18
+- **Date:** 2026-08-06 · rev 5: 2026-08-14 · rev 6: 2026-08-18 · rev 7: 2026-08-18
 - **Decision record:** four frames in two days, kept so founding main
   encodes none of the stale ones: *manual-as-definition* (8/5, Sol's lean)
   → *automated-as-definition* (8/6 AM, antra: fluid rooms must not be
@@ -440,6 +441,12 @@ which is what `subjectRef` exists for.
 3. Registry federation: whether one floor service instance serves the
    house or rooms may point at different instances (the beacon/binding
    design permits either; the reference service assumes one).
+4. Restart-gap recovery (FINDING-13): should an arbiter backscroll the
+   room on (re)connect and replay ops it missed? Replay raises stale-op
+   semantics — joins acknowledging a dead epoch's digest, bids against a
+   vanished book — that deserve design, not a hotfix. Rev 7 ships the
+   honest half only: the gap is marked in the humans' band; nothing
+   pretends to have heard what it didn't.
 
 ## 12. Findings ledger — what the trial taught the protocol
 
@@ -460,7 +467,9 @@ provenance. Where a finding changed this document, the section is named.
 | 8 | One offer-anchored lease punishes the responsive (jitter) and subsidizes the unresponsive (full-lease burn) | §2.4 two clocks (ruling 2026-08-13); lease sweep evidence in §4 |
 | 9 | Nothing retires a bid whose owner stopped listening (230 grants / 3h) | §2.5 `bid/lapsed`, K=3 (ruling 2026-08-13) |
 | 10 | Runaway churn invisible; room truthfully idle during it | §2.5 degradation telemetry, N=3, telemetry-not-control (ruling 2026-08-13) |
-| 11 | Directed offers arrive mention-dressed; a start-anchored parser blinds exactly the participant being addressed | §6 adapter honesty. Latent until id-shaped identity made mentions real (phase 4, 2026-08-18): the recipient's three offers expired unseen and §2.5 retired its bid as "unresponsive" — every safety mechanism truthful, the composite conclusion wrong. Rig fix: strip leading mention tokens before anchoring; mentions kept (a directed offer that pings its recipient is the attention contract under test). Disposition pending Mica |
+| 11 | Directed offers arrive mention-dressed; a start-anchored parser blinds exactly the participant being addressed | §6 adapter honesty. Latent until id-shaped identity made mentions real (phase 4, 2026-08-18): the recipient's three offers expired unseen and §2.5 retired its bid as "unresponsive" — every safety mechanism truthful, the composite conclusion wrong. Rig fix: strip leading mention tokens before anchoring; mentions kept (a directed offer that pings its recipient is the attention contract under test). Approved and merged same day (Mica, exact-head receipts) |
+| 12 | Directed offers never reached for a human's attention at all | Mirror of 11, found via a human's "nothing seems to happen": the mention branch was persona-only, so a `user:` participant's offer was an undressed line in a band they don't watch, with a 20 s fuse. The first "human accept-window datum" was retracted on this finding — the offer was never seen, so no human accept data existed. Rig fix: user-directed lines carry an inline mention token (relay-resolution probed live before building). Approved and merged same day (Mica: parent-head vectors fail exactly the claimed seams) |
+| 13 | Ops sent into an arbiter restart gap vanish without trace | A live join+speech landed in the seven minutes between epoch stop and relaunch; the transport is live-subscription-only, and from the room band a freshly started arbiter is indistinguishable from a dead one — even the relaunch announcement raced the connect by 20 s. Rig fix: the host banners the humans' band the moment listening begins ("ops sent while the service was down were not seen"). Recovering (vs. honestly marking) the gap is deliberately unfixed — see §11. Approved and merged same day (Mica: the banner verified as an honest lower bound — handler installed before the send, no replay claimed) |
 
 **Phase-3 confirmation run** (2026-08-17, first run on merged main after
 the phase-3 rulings landed; ledger `2026-08-17T18-51-44-493Z`): the first
@@ -480,6 +489,19 @@ provenance note: this ledger's participantIds are the residual
 `webhook:` name-keys; ledgers from phase 4 onward are id-shaped
 (`persona:`/`user:`) — do not diff participant identity across that
 boundary.
+
+**What phase 4's first hour said about the two-band split** (the trial
+question answering itself): findings 11–13 are one finding wearing three
+coats. The control band is where the floor is legible — and humans do not
+live there. A human's bid drew a correct offer, correctly booked,
+correctly expired, and the human experienced *nothing happening*; a
+restart was invisible for the same reason. For machine participants the
+two-band split is clean layering; for humans it is a one-way mirror. The
+protocol residue: **directed events must reach for their recipient's
+attention in the recipient's own band** (mentions for offers), and
+band-crossing state transitions (listening began, epoch changed) get
+announced in the humans' band, not only the machines'. The split stays —
+what changes is that the control band may not assume it is being watched.
 
 Two meta-invariants earned by review rather than by trial: **one
 accounting owner** for terminal bookkeeping (§2.3, Mica's delta-review
