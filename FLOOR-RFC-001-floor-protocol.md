@@ -1,15 +1,19 @@
 # FLOOR-RFC-001 — The floor protocol: an order book for speaking turns
 
-- **Status:** Draft rev 5 — trial-hardened. Founding RFC for
-  `anima-research/floor-control`; revised against ten findings from the
-  live multi-agent trial (2026-08-11 → 08-14) and Mica's rulings on them
-  (2026-08-13/14). Findings ledger in §12; every claim there has a raw
-  ledger or deterministic scenario behind it in `trial/`.
+- **Status:** Draft rev 6 — trial-hardened, confirmation-run grounded.
+  Founding RFC for `anima-research/floor-control`; revised against ten
+  findings from the live multi-agent trial (2026-08-11 → 08-14) and
+  Mica's rulings on them (2026-08-13/14), then reconfirmed by the
+  phase-3 run on merged main (2026-08-17, §12) — the first live outing
+  where all ten findings' machinery ran together — plus finding 11 from
+  phase 4's first minutes of human contact (2026-08-18). Findings ledger
+  in §12; every claim there has a raw ledger or deterministic scenario
+  behind it in `trial/`.
 - **Authors:** Ra & Weft (Claude). Core model by antra (2026-08-06, the
   order-book formulation); protocol freeze, identity/registry design, and
   cautions by Sol; precedent curation by Sol; trial review and phase-3
   rulings by Mica.
-- **Date:** 2026-08-06 · rev 5: 2026-08-14
+- **Date:** 2026-08-06 · rev 5: 2026-08-14 · rev 6: 2026-08-18
 - **Decision record:** four frames in two days, kept so founding main
   encodes none of the stale ones: *manual-as-definition* (8/5, Sol's lean)
   → *automated-as-definition* (8/6 AM, antra: fluid rooms must not be
@@ -201,6 +205,15 @@ or speech; and carry `deadline` + `overdueMs` on late expiry receipts —
 arbiter on a non-sleeping host; the reconciliation discipline exists for
 the day that fails.
 
+That day arrived on schedule: the phase-3 arbiter, left running overnight
+on a laptop (2026-08-17→18), slept in bursts despite `caffeinate -i`
+(which does not block lid-sleep). The ledger shows 32 witnessed clock
+gaps totaling ~416 minutes (longest single gap 17.4 min), each recorded
+against the expected cadence, with zero arbitration performed inside a
+gap and zero events misrepresented as punctual. Overnight quiescence is
+therefore evidence of *truthful* quiescence, not of long-run stability
+under load — the distinction the gap records exist to make legible.
+
 ## 3. Logic contracts (§the policy boundary)
 
 The announced contract is a real policy boundary (Sol): versioned and
@@ -375,13 +388,16 @@ which is what `subjectRef` exists for.
 1. **Chaired gate:** re-run Governance Session 1 under the service — same
    practice, same verbs, chair discretion intact — without the service
    getting in the way.
-2. **Fluid-room gate — MET (2026-08-11→14):** a chairless multi-party
-   text room with three-plus participants produces orderly,
-   visibly-booked turns — no starvation, no simultaneous holders.
-   Evidence: live portal-relay runs 3–5 (perfect fairness alternation,
-   zero violations) and run D on the phase-3 head (baseline throughput
-   maintained with an unresponsive participant present; its bid lapsed
-   after exactly three ignored offers).
+2. **Fluid-room gate — MET (2026-08-11→14; reconfirmed on merged main
+   2026-08-17):** a chairless multi-party text room with three-plus
+   participants produces orderly, visibly-booked turns — no starvation,
+   no simultaneous holders. Evidence: live portal-relay runs 3–5
+   (perfect fairness alternation, zero violations); run D on the
+   phase-3 head (baseline throughput maintained with an unresponsive
+   participant present; its bid lapsed after exactly three ignored
+   offers); and the phase-3 confirmation run (§12) — 50 grants split
+   25/25 between the two responsive participants, offer→accept median
+   1.9 s, every hold released inside its 30 s lease.
 3. **Voice gate:** the voice-audit e2e verbatim — one human utterance, two
    residents: one transcript, exactly one wake, exactly one synthesis, no
    audible overlap **asserted at the mixed sink**, barge-in aborts with
@@ -400,11 +416,18 @@ which is what `subjectRef` exists for.
    rude participant's legitimate bids still winning turns, and the
    unresponsive participant bounded by backoff and lapse instead of
    capturing throughput. Evidence: session A + run D ledgers; loopback
-   S3/S4.
+   S3/S4; and the phase-3 confirmation run (§12) — 12 violations logged
+   and never blocked while the violator's legitimate bids won 25 turns,
+   and the never-accepting participant drew exactly three service-owned
+   offer expiries (overdue by 22–621 ms, each charged exactly once)
+   before `bid/lapsed cause=ignored-offers` retired it at K=3.
 6. **Resilience gate:** suspend/resume closes overdue state before any
    new arbitration, with the gap witnessed and lateness truthful (§2.6);
    a late accept through the real route charges fairness exactly once.
-   Evidence: loopback S7 + the phase-3 discriminator suite.
+   Evidence: loopback S7 + the phase-3 discriminator suite; plus one
+   real sleeping-laptop night (§2.6) — 32 witnessed clock gaps, ~416
+   minutes, no arbitration inside a gap, no event misrepresented as
+   punctual.
 
 ## 11. Open questions
 
@@ -437,6 +460,26 @@ provenance. Where a finding changed this document, the section is named.
 | 8 | One offer-anchored lease punishes the responsive (jitter) and subsidizes the unresponsive (full-lease burn) | §2.4 two clocks (ruling 2026-08-13); lease sweep evidence in §4 |
 | 9 | Nothing retires a bid whose owner stopped listening (230 grants / 3h) | §2.5 `bid/lapsed`, K=3 (ruling 2026-08-13) |
 | 10 | Runaway churn invisible; room truthfully idle during it | §2.5 degradation telemetry, N=3, telemetry-not-control (ruling 2026-08-13) |
+| 11 | Directed offers arrive mention-dressed; a start-anchored parser blinds exactly the participant being addressed | §6 adapter honesty. Latent until id-shaped identity made mentions real (phase 4, 2026-08-18): the recipient's three offers expired unseen and §2.5 retired its bid as "unresponsive" — every safety mechanism truthful, the composite conclusion wrong. Rig fix: strip leading mention tokens before anchoring; mentions kept (a directed offer that pings its recipient is the attention contract under test). Disposition pending Mica |
+
+**Phase-3 confirmation run** (2026-08-17, first run on merged main after
+the phase-3 rulings landed; ledger `2026-08-17T18-51-44-493Z`): the first
+time findings 1–2 and 7–10's machinery all ran live together. In a
+three-profile room (talkative / slow / rude), 51 bids produced 53 offers
+and 50 completed grant cycles split exactly 25/25 between the responsive
+participants; offer→accept median 1.9 s (p90 10.1 s, all inside the 20 s
+accept window); every hold released within its 30 s lease — zero lease
+expiries. The rude participant logged 12 violations, none blocked, while
+winning 25 legitimate turns (§7's backstop-not-mechanism, observed). The
+slow participant was bounded precisely as specified: three service-owned
+offer expiries, then lapse at K=3. Quiet-room liveness ran one-shot
+discipline across the afternoon: 15 `floor/idle` emissions, 14 re-arms
+on logged liveness transitions, final idle correctly left disarmed. The
+overnight tail contributed the §2.6 sleeping-laptop evidence. Identity
+provenance note: this ledger's participantIds are the residual
+`webhook:` name-keys; ledgers from phase 4 onward are id-shaped
+(`persona:`/`user:`) — do not diff participant identity across that
+boundary.
 
 Two meta-invariants earned by review rather than by trial: **one
 accounting owner** for terminal bookkeeping (§2.3, Mica's delta-review
