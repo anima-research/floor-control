@@ -199,13 +199,25 @@ export class PortalTransport implements RoomTransport {
     });
   }
 
+  /** Relay send receipts carry `rm_<container>_<native>` ids, while
+   *  deliveries expose the bare native snowflake as `messageId`. Send
+   *  methods must RETURN ids in the delivery space — the head/subject
+   *  economy compares them (a head seeded from a raw send receipt can
+   *  never equal any delivered messageId: FINDING-14b, the relaunch that
+   *  churned stale-head against `head=rm_…`). Self-filtering still needs
+   *  the full relay id; the two spaces part ways here, deliberately. */
+  private static nativeIdOf(relayId: string): string {
+    const i = relayId.lastIndexOf('_');
+    return i >= 0 ? relayId.slice(i + 1) : relayId;
+  }
+
   /** One retry, then log-and-drop. Never throws into a fire-and-forget. */
   private async safeSend(params: Parameters<PortalClient['sendMessage']>[0]): Promise<string> {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         const r = await this.client.sendMessage(params);
         this.remember(r.messageId);
-        return r.messageId;
+        return PortalTransport.nativeIdOf(r.messageId);
       } catch (err) {
         if (attempt === 2) {
           console.error(`[portal-transport ${this.opts.personaName}] send failed twice, dropping:`, (err as Error).message);

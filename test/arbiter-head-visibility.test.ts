@@ -103,3 +103,40 @@ test('a refused op reaches the ledger with its reason (op-error)', async () => {
     host.stop();
   }
 });
+
+test('portal send receipts return delivery-space ids; self-filter keeps the relay id (FINDING-14b)', async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { PortalTransport } = await import('../trial/portal-transport.js');
+  const dir = mkdtempSync(join(tmpdir(), 'floor-idspace-'));
+  const credsFile = join(dir, 'creds.json');
+  writeFileSync(credsFile, JSON.stringify({ personaId: 'weft-test', token: 't' }));
+  const t = new PortalTransport({
+    url: 'wss://example.invalid',
+    credsFile,
+    personaName: 'Weft',
+    roomChannelId: 'chan-room',
+    controlThreadId: 'thread-control',
+  });
+  (t as unknown as { client: { sendMessage(p: unknown): Promise<{ messageId: string }> } }).client = {
+    sendMessage: async () => ({ messageId: 'rm_chan-room_1539388960416211105' }),
+  };
+  try {
+    // The returned id must be the bare native snowflake — the space
+    // deliveries use — never the rm_-prefixed send receipt.
+    assert.equal(await t.sendRoom('banner text'), '1539388960416211105');
+    // ...while self-filtering still recognizes the echo by its RELAY id.
+    const echo = t.toInbound({
+      id: 'rm_chan-room_1539388960416211105',
+      nativeId: '1539388960416211105',
+      channelId: 'chan-room',
+      content: 'banner text',
+      createdAt: new Date(1_786_990_000_000).toISOString(),
+      author: { kind: 'persona', personaId: 'someone-else', displayName: 'X' },
+    });
+    assert.equal(echo, null, 'own echo must still be filtered by relay id');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

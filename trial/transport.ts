@@ -25,6 +25,12 @@ export interface RoomTransport {
   locator: string;
   provenance: string;
   onMessage(handler: (m: InboundMessage) => void): void;
+  /** CONTRACT: the returned id lives in the SAME id-space as delivered
+   *  InboundMessage.messageId — heads and subjects compare the two, and a
+   *  transport whose send receipts use a different id scheme must convert
+   *  before returning (FINDING-14b: the portal relay's `rm_…` send
+   *  receipts vs bare-snowflake deliveries; loopback coincides, so only
+   *  the live relay discriminates). */
   sendRoom(text: string): Promise<string>;
   /** mention: transports that can address a participant (wake) do so. */
   sendControl(text: string, mention?: string): Promise<string>;
