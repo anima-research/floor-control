@@ -120,6 +120,24 @@ Two live-relay workarounds are compatibility keys, not protocol:
   and is inert on BOTH bands — swallowed, not spoken. portal#17 is the
   real fix.
 
+**Status 2026-08-18: both adapters retired** (portal#19 deployed; this
+repo's `123e6e7`, reviewed by Mica). The contract is now container-first:
+control-thread traffic classifies by actual `threadId`, parent-channel
+`!floor` survives only as an explicit human-tolerance route, unrelated
+threads are dropped, and self/author identity keys on exact `personaId`
+(deliveries carry it). The `webhook:` name-key remains only as a
+collision-refusing last resort for authors the relay itself declines to
+attribute.
+
+One residual edge, ledgered from Mica's `123e6e7` review rather than
+patched: if the relay declines persona attribution because a live echo's
+display name is ambiguous *and* the gateway echo beats the send RPC's
+attribution write, our own message can arrive under residual `webhook:`
+identity instead of being recognized as self. That is the relay contract
+being honest about what it knows — not a reason to revive the name-shape
+filter, which would swallow other personas sharing a display name. If it
+occurs in a live run, record the message id in that run's ledger.
+
 Send semantics: retry once, then log-and-drop — acceptable only because
 every drop lands in the ledger (`send-drop`) and the arbiter survives. A
 send attempt is never reported as an applied floor action; the book's own
