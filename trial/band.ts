@@ -85,9 +85,16 @@ export interface FloorEventLine {
   fields: Record<string, string>;
 }
 
-/** Inverse of eventLine — what a participant runs over control-band traffic. */
+/** Inverse of eventLine — what a participant runs over control-band traffic.
+ *  Directed events (grant/offered) arrive mention-prefixed: the relay renders
+ *  `mentionPersonaIds` as a leading `<@&role>` token in the delivered content.
+ *  The address is transport dressing, not part of the line — strip any leading
+ *  mention tokens before anchoring. (Latent until id-shaped identity: under
+ *  `webhook:` keys the mention branch never fired, so no parser had ever seen
+ *  a dressed line. First observed live 2026-08-18, phase 4, grants g1–g3.) */
 export function parseEvent(line: string): FloorEventLine | null {
-  const m = /^⟨floor⟩\s+(\S+)(?:\s+(.*))?$/.exec(line.trim());
+  const undressed = line.trim().replace(/^(?:<@[!&]?\d+>\s*)+/, '');
+  const m = /^⟨floor⟩\s+(\S+)(?:\s+(.*))?$/.exec(undressed);
   if (!m) return null;
   const fields: Record<string, string> = {};
   for (const t of (m[2] ?? '').split(/\s+/).filter(Boolean)) {
