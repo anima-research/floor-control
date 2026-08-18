@@ -95,9 +95,21 @@ export class FloorRoomHost {
     // a join+speech landed in the seven minutes between epoch stop and
     // relaunch). The banner marks, in the humans' band, the exact moment
     // listening begins; anything you sent before it, the floor never heard.
-    void this.transport.sendRoom(
-      `floor service listening from this message onward (${c.contract.logicId} epoch ${c.logicEpoch}) — \`!floor join\` to participate; ops sent while the service was down were not seen.`,
-    );
+    // The banner is room speech to every other participant — a prepared
+    // bidder will correctly bind its content to it — so the arbiter must
+    // count it as the room head too. Self-filtering its own echo left
+    // lastRoomMessageId null, every offer said head=none, and the sole
+    // prepared bot declined stale-head into an unbounded re-offer loop
+    // (FINDING-14, epoch 2026-08-18T20-47: ~100 six-second cycles, born
+    // two seconds after launch). Guard: never clobber real speech that
+    // arrived while the send was in flight.
+    void this.transport
+      .sendRoom(
+        `floor service listening from this message onward (${c.contract.logicId} epoch ${c.logicEpoch}) — \`!floor join\` to participate; ops sent while the service was down were not seen.`,
+      )
+      .then((id) => {
+        if (id && this.lastRoomMessageId === null) this.lastRoomMessageId = id;
+      });
   }
 
   stop(): void {
@@ -132,6 +144,11 @@ export class FloorRoomHost {
     try {
       this.apply(op, m);
     } catch (err) {
+      // The refusal must reach the ledger, not only the control band — a
+      // failed op whose refusal lives solely in channel scroll makes the
+      // ledger claim the op silently vanished (FINDING: epoch 20-47's
+      // human accept left no trace of *why* it produced no grant).
+      this.ledger({ kind: 'op-error', at: m.at, participantId: m.authorId, op: op.verb, id: op.id, reason: (err as Error).message });
       void this.transport.sendControl(
         eventLine('error', { op: op.verb, from: m.authorName, reason: (err as Error).message }),
       );
