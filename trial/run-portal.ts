@@ -39,6 +39,10 @@ const idleAfterMs = idleArg === 'off' ? Number.POSITIVE_INFINITY : (parseDuratio
 // turns are budgeted; the host itself keeps arbitrating for live
 // participants after the bots go quiet.
 const maxTurns = Number(arg('max-turns', '25'));
+// Humans ride exempt (per Session 1's "humans speak freely"): their speech
+// moves the head and is never a violation. Comma-separated participantIds,
+// e.g. --exempt user:252783081755246602,user:134390790938951680
+const exemptIds = arg('exempt', '').split(',').map((s) => s.trim()).filter(Boolean);
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 
 // The ledger opens with a manifest naming the exact code under trial —
@@ -60,6 +64,7 @@ appendFileSync(
     botCount,
     profiles: profiles.slice(0, botCount),
     idleAfterMs: Number.isFinite(idleAfterMs) ? idleAfterMs : 'off',
+    exemptIds,
   }) + '\n',
 );
 
@@ -86,6 +91,7 @@ const host = new FloorRoomHost(hostTransport, new FluidFairnessLogic({ leaseMs }
   tickMs: 1000,
   ledgerPath,
   idleAfterMs,
+  exemptIds,
 });
 host.start();
 console.log(`floor-service live: room=${rig.roomChannelId} control=${rig.controlThreadId} lease=${leaseMs}ms`);
