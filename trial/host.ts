@@ -208,7 +208,12 @@ export class FloorRoomHost {
           },
           now,
         );
-        void this.transport.sendControl(eventLine('bid/accepted', { bidId: bid.bidId, participant: m.authorName, r: bid.revision }));
+        // The ack is the host's own line (it names the participant, which the
+        // book's bid/created does not); the field vocabulary is the book's —
+        // `revision`, never the `r` shorthand (housekeeping, 2026-08-18).
+        void this.transport.sendControl(
+          eventLine('bid/accepted', { bidId: bid.bidId, participant: m.authorName, revision: bid.revision }),
+        );
         return;
       }
       case 'amend': {
@@ -216,8 +221,12 @@ export class FloorRoomHost {
         if (op.args.readiness) patch.readinessKind = op.args.readiness;
         if (op.args.subject) patch.subjectRef = op.args.subject;
         if (op.args.digest) patch.payload = { digest: op.args.digest };
-        const bid = this.book.amendBid(this.mustId(op), patch, now);
-        void this.transport.sendControl(eventLine('bid/amended', { bidId: bid.bidId, r: bid.revision }));
+        // No direct ack here: the book logs bid/amended itself and flush()
+        // posts it in the same processing burst — the old direct send made
+        // every amend appear twice on the control band, once as `r=` and
+        // once as `revision=` (spotted live 2026-08-18, parked by Mica for
+        // this pass). One event, one line, book vocabulary.
+        this.book.amendBid(this.mustId(op), patch, now);
         return;
       }
       case 'cancel':
