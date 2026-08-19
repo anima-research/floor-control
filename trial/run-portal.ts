@@ -43,6 +43,17 @@ const maxTurns = Number(arg('max-turns', '25'));
 // moves the head and is never a violation. Comma-separated participantIds,
 // e.g. --exempt user:252783081755246602,user:134390790938951680
 const exemptIds = arg('exempt', '').split(',').map((s) => s.trim()).filter(Boolean);
+// Send-rate breaker, `--send-budget 60/300s` shape (maxSends/window). Default
+// OFF in the lab — scripted stress epochs legitimately exceed any
+// social-channel cap; REQUIRED for any run pointed at a channel people
+// live in (shadow-mode prerequisite).
+const budgetArg = arg('send-budget', 'off');
+const sendBudget = (() => {
+  if (budgetArg === 'off') return undefined;
+  const m = /^(\d+)\/(\d+)(s|m)$/.exec(budgetArg);
+  if (!m) throw new Error(`--send-budget: want N/Ns|Nm (e.g. 60/300s), got ${budgetArg}`);
+  return { maxSends: Number(m[1]), windowMs: Number(m[2]) * (m[3] === 'm' ? 60_000 : 1000) };
+})();
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 
 // The ledger opens with a manifest naming the exact code under trial —
@@ -65,6 +76,7 @@ appendFileSync(
     profiles: profiles.slice(0, botCount),
     idleAfterMs: Number.isFinite(idleAfterMs) ? idleAfterMs : 'off',
     exemptIds,
+    sendBudget: sendBudget ?? 'off',
   }) + '\n',
 );
 
@@ -85,6 +97,7 @@ const hostTransport = new PortalTransport({
   roomChannelId: rig.roomChannelId,
   controlThreadId: rig.controlThreadId,
   onAnomaly: ledgerAnomaly,
+  sendBudget,
 });
 await hostTransport.connect();
 const host = new FloorRoomHost(hostTransport, new FluidFairnessLogic({ leaseMs }), {

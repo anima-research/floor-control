@@ -44,9 +44,33 @@ export interface PortalTransportOptions {
   /** Receives anomaly records (identity refusals, send drops) so the run
    *  can ledger them — a drop that only reaches a console is not a receipt. */
   onAnomaly?: (entry: Record<string, unknown>) => void;
+  /** Send-rate circuit breaker — blast-radius control for live/social
+   *  channels (shadow-mode prerequisite; the cc-spawner burst and the F14
+   *  churn are the two measured failure shapes). When the rolling window
+   *  fills: one final plain notice is sent, then hard silence until the
+   *  window drains; every suppressed send is counted and the trip/reset
+   *  pair is ledgered via onAnomaly. Omit for no breaker (lab default —
+   *  scripted stress epochs legitimately exceed any social-channel cap). */
+  sendBudget?: SendBudget;
 }
 
 const CONTROL_PREFIXES = ['!floor', '⟨floor⟩'];
+
+/** §9 content minimization for ledgered anomalies: protocol-band lines are
+ *  metadata and keep a bounded preview; everything else is described by
+ *  size only. */
+function previewOf(content: string): { contentPreview: string } | { contentBytes: number; contentWithheld: true } {
+  if (CONTROL_PREFIXES.some((p) => content.trimStart().replace(/^(?:<@[!&]?\d+>\s*)+/, '').startsWith(p))) {
+    return { contentPreview: content.slice(0, 80) };
+  }
+  return { contentBytes: Buffer.byteLength(content, 'utf8'), contentWithheld: true };
+}
+
+export interface SendBudget {
+  /** Max sends inside any rolling window; 'off' disables the breaker. */
+  maxSends: number;
+  windowMs: number;
+}
 
 export class PortalTransport implements RoomTransport {
   readonly locator: string;
@@ -59,6 +83,10 @@ export class PortalTransport implements RoomTransport {
   /** Derived participantId → first-seen raw fingerprint, for the residual
    *  `webhook:` last-resort identities only (see header note 3). */
   private fingerprints = new Map<string, string>();
+  /** Send timestamps inside the breaker's rolling window. */
+  private sendTimes: number[] = [];
+  /** Non-null while tripped: suppressed-send counter for the reset receipt. */
+  private tripped: { at: number; suppressed: number } | null = null;
 
   constructor(private opts: PortalTransportOptions) {
     const creds = JSON.parse(readFileSync(opts.credsFile, 'utf8')) as {
@@ -211,8 +239,62 @@ export class PortalTransport implements RoomTransport {
     return i >= 0 ? relayId.slice(i + 1) : relayId;
   }
 
+  /** Rolling-window send breaker (see PortalTransportOptions.sendBudget).
+   *  Returns true when this send may proceed. */
+  private breakerAdmits(now: number): boolean {
+    const budget = this.opts.sendBudget;
+    if (!budget) return true;
+    this.sendTimes = this.sendTimes.filter((t) => now - t < budget.windowMs);
+    if (this.tripped) {
+      if (this.sendTimes.length < budget.maxSends) {
+        // Window drained: resume, and say truthfully what was dropped.
+        this.opts.onAnomaly?.({
+          kind: 'send-breaker-reset',
+          at: now,
+          persona: this.opts.personaName,
+          trippedAt: this.tripped.at,
+          suppressed: this.tripped.suppressed,
+        });
+        this.tripped = null;
+        return true;
+      }
+      this.tripped.suppressed += 1;
+      return false;
+    }
+    if (this.sendTimes.length >= budget.maxSends) {
+      this.tripped = { at: now, suppressed: 1 };
+      this.opts.onAnomaly?.({
+        kind: 'send-breaker-trip',
+        at: now,
+        persona: this.opts.personaName,
+        maxSends: budget.maxSends,
+        windowMs: budget.windowMs,
+      });
+      // One final plain notice — the room deserves to know the arbiter went
+      // quiet and why; after this line, hard silence until the window drains.
+      void this.rawSend({
+        channelId: this.opts.roomChannelId,
+        content: `[floor service: send budget exhausted (${budget.maxSends}/${Math.round(budget.windowMs / 1000)}s) — going quiet until the window drains; sends in between are being dropped and counted]`,
+      });
+      return false;
+    }
+    return true;
+  }
+
   /** One retry, then log-and-drop. Never throws into a fire-and-forget. */
   private async safeSend(params: Parameters<PortalClient['sendMessage']>[0]): Promise<string> {
+    const now = Date.now();
+    // Suppressed sends are counted, not individually ledgered — a runaway
+    // must not flood the ledger through the very mechanism that contains
+    // it. The trip/reset receipts carry the counts.
+    if (!this.breakerAdmits(now)) return '';
+    this.sendTimes.push(now);
+    return this.rawSend(params);
+  }
+
+  /** The unguarded send path — used by safeSend and by the breaker's own
+   *  final notice (which must not re-enter the breaker). */
+  private async rawSend(params: Parameters<PortalClient['sendMessage']>[0]): Promise<string> {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         const r = await this.client.sendMessage(params);
@@ -226,7 +308,10 @@ export class PortalTransport implements RoomTransport {
             at: Date.now(),
             persona: this.opts.personaName,
             error: (err as Error).message,
-            contentPreview: String((params as { content?: string }).content ?? '').slice(0, 80),
+            // §9: the ledger records metadata, never content. Protocol-band
+            // lines (⟨floor⟩/!floor) ARE metadata and keep a preview for
+            // debuggability; anything else is withheld by size.
+            ...previewOf(String((params as { content?: string }).content ?? '')),
           });
           return '';
         }
