@@ -381,6 +381,20 @@ export class FloorRoomHost {
       if (e.type === 'grant/offered') {
         this.offerHeads.set(String((e.data as { grantId: string }).grantId), this.lastRoomMessageId ?? 'none');
       }
+      // The stamp exists for exactly one reader — a stale-head decline —
+      // and that read happens in apply(), strictly before this flush sees
+      // the decline's terminal event. Terminal = the grant can never be
+      // read again; an unbounded map of dead grant ids is a slow leak
+      // (Mica review, 2026-08-19).
+      if (
+        e.type === 'grant/declined' ||
+        e.type === 'grant/released' ||
+        e.type === 'grant/revoked' ||
+        e.type === 'grant/offer-expired' ||
+        e.type === 'grant/lease-expired'
+      ) {
+        this.offerHeads.delete(String((e.data as { grantId: string }).grantId));
+      }
       void this.transport.sendControl(
         eventLine(e.type, {
           ...e.data,

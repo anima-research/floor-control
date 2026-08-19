@@ -159,3 +159,137 @@ describe('§2.2 stale-head suspension', () => {
     assert.equal(svc.arbitrate(r.roomId, T0 + 4).grant?.participantId, 'chooser', 'immediately re-grantable');
   });
 });
+
+// ── Host seam: traveling discriminators (Mica review 2026-08-19) ──
+// The race repair and the stamp lifecycle live in trial/host.ts, not the
+// book — so they are exercised here through the REAL ticking host and
+// transport path, per the review: removing offer-head stamping or the
+// post-decline reconcile must fail these.
+
+import { FloorRoomHost } from '../trial/host.js';
+import { LoopbackBus, LoopbackTransport } from '../trial/transport.js';
+import { parseEvent } from '../trial/band.js';
+
+async function until(cond: () => boolean, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (cond()) return true;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return cond();
+}
+
+function hostRig(acceptTtl?: number) {
+  const bus = new LoopbackBus();
+  const host = new FloorRoomHost(
+    new LoopbackTransport(bus, 'floor-service', 'floor-service'),
+    new FluidFairnessLogic({
+      speechLeaseMs: 1000,
+      ...(acceptTtl ? { acceptTtlMs: { prepared: acceptTtl, intent: acceptTtl, manual: acceptTtl, urgent: acceptTtl } } : {}),
+    }),
+    { tickMs: 25, idleAfterMs: 600_000 },
+  );
+  const lines = () =>
+    bus.log
+      .filter((m) => m.surface === 'control' && m.authorId === 'floor-service')
+      .map((m) => parseEvent(m.text))
+      .filter((e): e is NonNullable<ReturnType<typeof parseEvent>> => e !== null);
+  const heads = () => (host as unknown as { offerHeads: Map<string, string> }).offerHeads;
+  return { bus, host, lines, heads };
+}
+
+describe('host seam: stale-head suspension through the real transport path', () => {
+  it('race repair: offer stamped A, head advances to B before the decline — suspension records A, then reactivates immediately with no further speech', async () => {
+    const { bus, host, lines } = hostRig();
+    host.start();
+    try {
+      const headA = bus.post('ra', 'ra', 'room', 'speech A');
+      bus.post('bot', 'bot', 'control', '!floor join');
+      await until(() => lines().some((e) => e.type === 'joined'), 2_000);
+      bus.post('bot', 'bot', 'control', `!floor bid readiness=prepared subject=${headA}`);
+      assert.ok(await until(() => lines().some((e) => e.type === 'grant/offered'), 2_000), 'offer emitted');
+      const offer = lines().find((e) => e.type === 'grant/offered')!;
+      assert.equal(offer.fields.head, headA, 'offer stamped with head A');
+
+      // The room moves on while the offer is in flight.
+      bus.post('ra', 'ra', 'room', 'speech B');
+      await new Promise((r) => setTimeout(r, 40));
+
+      // The decline judges the OFFER's head — and the current head is
+      // already past it, so suspension must resolve immediately.
+      bus.post('bot', 'bot', 'control', `!floor decline ${offer.fields.grantId} reason=stale-head`);
+
+      assert.ok(
+        await until(() => lines().some((e) => e.type === 'bid/suspended'), 2_000),
+        'suspension recorded',
+      );
+      const suspended = lines().find((e) => e.type === 'bid/suspended')!;
+      assert.equal(suspended.fields.blockedHead, headA, 'blocks the head the decliner judged, not decline-time head');
+
+      // No further room speech from here: reactivation must come from the
+      // post-decline reconcile alone, and the bid must be re-offerable.
+      assert.ok(
+        await until(() => lines().some((e) => e.type === 'bid/reactivated'), 2_000),
+        'immediate reactivation — the blocking condition was already gone',
+      );
+      assert.ok(
+        await until(() => lines().filter((e) => e.type === 'grant/offered').length >= 2, 2_000),
+        're-offered without any new speech',
+      );
+    } finally {
+      host.stop();
+    }
+  });
+
+  it('offerHeads is bounded to unresolved grants: read-then-delete across decline, release, and expiry', async () => {
+    const { bus, host, lines, heads } = hostRig(150);
+    host.start();
+    try {
+      const headA = bus.post('ra', 'ra', 'room', 'speech A');
+      bus.post('bot', 'bot', 'control', '!floor join');
+      await until(() => lines().some((e) => e.type === 'joined'), 2_000);
+
+      // Cycle 1 — stale-head decline: the stamp must be read (suspension
+      // carries it) and then dropped.
+      bus.post('bot', 'bot', 'control', `!floor bid readiness=prepared subject=${headA}`);
+      await until(() => lines().some((e) => e.type === 'grant/offered'), 2_000);
+      const g1 = lines().find((e) => e.type === 'grant/offered')!;
+      bus.post('ra', 'ra', 'room', 'speech B');
+      await new Promise((r) => setTimeout(r, 40));
+      bus.post('bot', 'bot', 'control', `!floor decline ${g1.fields.grantId} reason=stale-head`);
+      await until(() => lines().some((e) => e.type === 'bid/suspended'), 2_000);
+      assert.equal(
+        lines().find((e) => e.type === 'bid/suspended')!.fields.blockedHead,
+        headA,
+        'stamp was read before deletion',
+      );
+      assert.ok(await until(() => !heads().has(g1.fields.grantId), 2_000), 'declined grant dropped from offerHeads');
+
+      // Cycle 2 — accept and release: stamp survives the accept, dies with
+      // the terminal.
+      await until(() => lines().filter((e) => e.type === 'grant/offered').length >= 2, 2_000);
+      const g2 = lines().filter((e) => e.type === 'grant/offered')[1];
+      assert.ok(heads().has(g2.fields.grantId), 'live offer keeps its stamp');
+      bus.post('bot', 'bot', 'control', `!floor accept ${g2.fields.grantId}`);
+      await until(() => lines().some((e) => e.type === 'grant/accepted'), 2_000);
+      assert.ok(heads().has(g2.fields.grantId), 'accepted grant is unresolved — stamp retained');
+      bus.post('bot', 'bot', 'control', `!floor release ${g2.fields.grantId}`);
+      assert.ok(await until(() => !heads().has(g2.fields.grantId), 2_000), 'released grant dropped');
+
+      // Cycle 3 — offer expiry (150ms accept TTL): the sweep's terminal
+      // also cleans up.
+      bus.post('ra', 'ra', 'room', 'speech C');
+      bus.post('bot', 'bot', 'control', '!floor bid readiness=intent');
+      await until(() => lines().filter((e) => e.type === 'grant/offered').length >= 3, 2_000);
+      const g3 = lines().filter((e) => e.type === 'grant/offered')[2];
+      assert.ok(
+        await until(() => lines().some((e) => e.type === 'grant/offer-expired' && e.fields.grantId === g3.fields.grantId), 3_000),
+        'offer expired',
+      );
+      assert.ok(await until(() => !heads().has(g3.fields.grantId), 2_000), 'expired grant dropped');
+      assert.equal(heads().size, 0, 'no unresolved grants → empty map');
+    } finally {
+      host.stop();
+    }
+  });
+});
