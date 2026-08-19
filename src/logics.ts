@@ -112,6 +112,14 @@ export class FluidFairnessLogic implements Logic {
     this.strikes.delete(participantId); // a responsive terminal clears strikes
   }
 
+  /** A stale-head decline is responsive (strikes clear) but the decliner
+   *  never held the floor — stamping lastHeld would rotate them to the
+   *  back as if they had spoken, which is exactly the fairness punishment
+   *  the §2.2 ruling forbids for a correct refusal. */
+  noteResponsiveDecline(participantId: string): void {
+    this.strikes.delete(participantId);
+  }
+
   /** An expired lease charges held-history AND accrues a strike: backoff
    *  doubles per consecutive expiry, bounded by expiryBackoffCapMs. */
   noteExpired(participantId: string, at: number): void {

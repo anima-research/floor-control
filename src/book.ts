@@ -114,7 +114,17 @@ export class FloorBook {
       if (existing.state === 'granted') {
         throw new Error(`${env.participantId} holds a granted bid (${existing.bidId}); release or decline before rebidding`);
       }
-      if (existing.state === 'open' || existing.state === 'stale') {
+      if (existing.state === 'open' || existing.state === 'stale' || existing.state === 'suspended') {
+        if (existing.state === 'suspended') {
+          existing.state = 'open';
+          existing.suspendedOnHead = undefined;
+          this.emit('bid/reactivated', now, {
+            bidId: existing.bidId,
+            participantId: existing.participantId,
+            revision: existing.revision + 1,
+            cause: 'reaffirmation',
+          });
+        }
         if (existing.state === 'stale') {
           existing.state = 'open';
           existing.logicEpoch = this.logicEpoch;
@@ -152,17 +162,32 @@ export class FloorBook {
 
   amendBid(bidId: string, patch: Partial<Pick<Bid, 'subjectRef' | 'readinessKind' | 'expiresAt' | 'payload'>>, now: number): Bid {
     const bid = this.mustBid(bidId);
+    const wasSuspended = bid.state === 'suspended';
     if (bid.state === 'stale') {
       // Re-affirmation: amending a stale bid under the current contract
       // revives it — the participant has seen the new terms.
       bid.state = 'open';
       bid.logicEpoch = this.logicEpoch;
       bid.contractDigest = this.contractDigest;
+    } else if (bid.state === 'suspended') {
+      // Participant-authored reaffirmation (ruling 2026-08-18): the author
+      // says the point stands against the current head — head-staleness is
+      // not meaning-staleness, and only the author can tell them apart.
+      bid.state = 'open';
+      bid.suspendedOnHead = undefined;
     } else if (bid.state !== 'open') {
-      throw new Error(`bid ${bidId} is ${bid.state}; only open/stale bids amend`);
+      throw new Error(`bid ${bidId} is ${bid.state}; only open/stale/suspended bids amend`);
     }
     Object.assign(bid, patch);
     bid.revision += 1;
+    if (wasSuspended) {
+      this.emit('bid/reactivated', now, {
+        bidId: bid.bidId,
+        participantId: bid.participantId,
+        revision: bid.revision,
+        cause: 'reaffirmation',
+      });
+    }
     this.emit('bid/amended', now, { bidId, revision: bid.revision });
     return bid;
   }
@@ -206,6 +231,18 @@ export class FloorBook {
     now: number,
   ): Grant {
     const bid = this.mustBid(bidId);
+    if (bid.state === 'suspended') {
+      // Ruling 2026-08-18: reaching a suspended revision through the offer
+      // path is a SERVICE invariant failure, not participant error — the
+      // book reports itself loudly before refusing.
+      this.emit('book/invariant', now, {
+        kind: 'offer-of-suspended-revision',
+        bidId,
+        revision: bid.revision,
+        blockedHead: bid.suspendedOnHead ?? 'unknown',
+      });
+      throw new Error(`invariant: bid ${bidId} r${bid.revision} is suspended (stale-head); it must not re-enter arbitration until head advance or reaffirmation`);
+    }
     if (bid.state !== 'open') throw new Error(`bid ${bidId} is ${bid.state}, not open`);
     if (bid.revision !== bidRevision) {
       throw new Error(`stale bid revision: grant answers r${bidRevision}, bid is at r${bid.revision}`);
@@ -271,9 +308,51 @@ export class FloorBook {
     return g;
   }
 
-  declineGrant(grantId: string, now: number, reason?: string): Receipt {
+  declineGrant(grantId: string, now: number, reason?: string, blockedHead?: string): Receipt {
     // The prepared-bid fast path's stale-head branch: winner declines, rebids.
-    return this.terminate(grantId, 'declined', now, reason);
+    const g = this.activeGrant && this.activeGrant.grantId === grantId ? this.activeGrant : null;
+    const receipt = this.terminate(grantId, 'declined', now, reason);
+    // FINDING-14 family (ruling 2026-08-18): a stale-head decline parks the
+    // exact revision — terminate returned it to 'open', which is precisely
+    // the churn engine (return-to-book → sole bid → immediate futile
+    // re-offer, measured at ~6s/cycle for ~100 cycles). Suspension keeps
+    // the decline responsive (no lapse, no fairness charge) while making
+    // repetition structurally impossible.
+    if (reason === 'stale-head' && g) {
+      const bid = this.bids.get(g.bidId);
+      if (bid && bid.state === 'open') {
+        bid.state = 'suspended';
+        bid.suspendedOnHead = blockedHead ?? null;
+        this.emit('bid/suspended', now, {
+          bidId: bid.bidId,
+          participantId: bid.participantId,
+          revision: bid.revision,
+          cause: 'stale-head',
+          blockedHead: blockedHead ?? 'unknown',
+        });
+      }
+    }
+    return receipt;
+  }
+
+  /** Head advance reactivates suspended revisions (ruling 2026-08-18): the
+   *  condition that made them futile is gone. A null blockedHead (offer
+   *  carried no head) reactivates on any advance. Idempotent — a repeated
+   *  head is not an advance. */
+  noteHead(headId: string, now: number): void {
+    for (const bid of this.bids.values()) {
+      if (bid.state !== 'suspended') continue;
+      if (bid.suspendedOnHead === headId) continue;
+      bid.state = 'open';
+      bid.suspendedOnHead = undefined;
+      this.emit('bid/reactivated', now, {
+        bidId: bid.bidId,
+        participantId: bid.participantId,
+        revision: bid.revision,
+        cause: 'head-advance',
+        head: headId,
+      });
+    }
   }
 
   continueGrant(grantId: string, newLeaseUntil: number, now: number): Grant {

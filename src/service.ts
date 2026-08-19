@@ -156,11 +156,20 @@ export class FloorService {
     }
   }
 
-  decline(roomId: string, grantId: string, now: number, reason?: string): Receipt {
+  decline(roomId: string, grantId: string, now: number, reason?: string, blockedHead?: string): Receipt {
     const room = this.mustRoom(roomId);
     const grant = room.book.liveGrant;
-    const receipt = room.book.declineGrant(grantId, now, reason);
-    if (grant) this.noteTerminal(room, grant, now);
+    const receipt = room.book.declineGrant(grantId, now, reason, blockedHead);
+    if (grant) {
+      if (reason === 'stale-head' && room.logic instanceof FluidFairnessLogic) {
+        // §2.2 ruling: fairness MUST NOT punish a correct stale-head
+        // refusal. Responsive (strikes clear) — but the decliner never
+        // held the floor, so no held-history stamp.
+        room.logic.noteResponsiveDecline(grant.participantId);
+      } else {
+        this.noteTerminal(room, grant, now);
+      }
+    }
     return receipt;
   }
 

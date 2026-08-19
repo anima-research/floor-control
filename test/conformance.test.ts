@@ -394,6 +394,6 @@ describe('bid replacement preserves queue age (ruling 2026-08-11)', () => {
     // revision (see "grants bind the exact bid revision they answer") and a
     // granted bid can be neither replaced (see "rebidding while holding a
     // granted bid is refused") nor amended.
-    assert.throws(() => room.book.amendBid('b1', { subjectRef: 'm9' }, T0 + 5), /only open\/stale bids amend/);
+    assert.throws(() => room.book.amendBid('b1', { subjectRef: 'm9' }, T0 + 5), /only open\/stale\/suspended bids amend/);
   });
 });

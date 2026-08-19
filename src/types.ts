@@ -40,6 +40,12 @@ export type BidState =
   /** Resolved into a recorded contribution without a grant (the Session 1
    *  one-sentence substitute, generalized — §8). */
   | 'substituted'
+  /** A stale-head decline parks the exact revision (FINDING-14 family;
+   *  ruling 2026-08-18): re-offering it against the same head is provably
+   *  futile. Eligibility returns on head advance or participant
+   *  reaffirmation; queue age is preserved; fairness is never charged for
+   *  a correct refusal. */
+  | 'suspended'
   /** Terminal: the owner ignored three consecutive offers (no accept, no
    *  decline — declining is responsive). A lapsed bid receives no further
    *  grants; re-entry requires an explicit fresh bid. The lapse records
@@ -52,6 +58,9 @@ export interface Bid extends BidEnvelope {
   /** Consecutive offers this bid's owner let expire unanswered. Cleared by
    *  acceptance; untouched by decline (responsive); reset on replace. */
   ignoredOffers: number;
+  /** The head this revision was declared stale against (state 'suspended'
+   *  only); null = the offer carried no known head. */
+  suspendedOnHead?: string | null;
 }
 
 /** §2.3 — a grant binds the exact bid revision it answers.
@@ -154,6 +163,12 @@ export interface FloorEvent {
     | 'grant/offer-expired'
     | 'grant/lease-expired'
     | 'bid/lapsed'
+    | 'bid/suspended'
+    | 'bid/reactivated'
+    /** A service invariant failed (e.g. an offer reached a suspended
+     *  revision). Distinct from degradation telemetry: this is the book
+     *  reporting itself, loudly. */
+    | 'book/invariant'
     /** Telemetry, not control (FINDING-10, N=3): three consecutive offer
      *  expiries with no intervening acceptance. Emitted once per episode;
      *  the next acceptance emits book/recovered. Never alters fairness,

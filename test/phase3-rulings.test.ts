@@ -128,12 +128,19 @@ describe('FINDING-9 — bid/lapsed after three ignored offers (discriminators 4,
   });
 
   it('D8: decline is responsive — three declines neither lapse the bid nor count as ignored', () => {
+    // Rev 8 note: the original D8 declined with reason=stale-head and
+    // asserted immediate re-grantability — exactly the churn engine
+    // FINDING-14 measured live. Stale-head now SUSPENDS (§2.2, ruling
+    // 2026-08-18; see stale-head-suspension.test.ts). The responsiveness
+    // invariant D8 exists to protect is reason-independent, so it is
+    // asserted here with a content reason; the stale-head path keeps the
+    // same no-lapse/no-ignoredOffers property under suspension.
     const r = room(svc);
     bid(r.book, 'chooser', 'b1', T0 + 1);
     let t = T0 + 2;
     for (let i = 0; i < 3; i++) {
       const g = svc.arbitrate(r.roomId, t).grant!;
-      svc.decline(r.roomId, g.grantId, t + 1, 'stale-head');
+      svc.decline(r.roomId, g.grantId, t + 1, 'content-withdrawn');
       t += 10;
     }
     const b = r.book.listBids().find((x) => x.bidId === 'b1')!;

@@ -42,6 +42,9 @@ export class FloorRoomHost {
   private bidCounter = 0;
   private lastSeq = 0;
   private lastRoomMessageId: string | null = null;
+  /** Exact head each offer was stamped with — a stale-head decline blocks
+   *  that head, not whatever the room head is by decline-processing time. */
+  private offerHeads = new Map<string, string>();
   private lastActivityAt = Date.now();
   private lastActivityCause = 'startup';
   private lastIdleAt = 0;
@@ -134,6 +137,8 @@ export class FloorRoomHost {
       this.lastActivityAt = m.at;
       this.lastActivityCause = 'speech';
       this.activitySeq += 1;
+      // Head advance reactivates stale-head-suspended bids (§2.2 ruling).
+      this.book.noteHead(m.messageId, m.at);
       this.audit(m);
       this.pump();
       return;
@@ -241,9 +246,18 @@ export class FloorRoomHost {
           throw err;
         }
         return;
-      case 'decline':
-        this.service.decline(this.roomId, this.mustId(op), now, op.args.reason);
+      case 'decline': {
+        const grantId = this.mustId(op);
+        const blockedHead = this.offerHeads.get(grantId);
+        this.service.decline(this.roomId, grantId, now, op.args.reason, blockedHead);
+        // If the room head already moved past the head this offer carried,
+        // the suspension's blocking condition is ALREADY gone — reconcile
+        // immediately rather than waiting for the next speech.
+        if (this.lastRoomMessageId && this.lastRoomMessageId !== blockedHead) {
+          this.book.noteHead(this.lastRoomMessageId, now);
+        }
         return;
+      }
       case 'release':
         this.service.release(this.roomId, this.mustId(op), now);
         return;
@@ -364,6 +378,9 @@ export class FloorRoomHost {
         offered && e.type === 'grant/offered' && e.data.grantId === offered.grantId
           ? offered.participantId
           : undefined;
+      if (e.type === 'grant/offered') {
+        this.offerHeads.set(String((e.data as { grantId: string }).grantId), this.lastRoomMessageId ?? 'none');
+      }
       void this.transport.sendControl(
         eventLine(e.type, {
           ...e.data,
