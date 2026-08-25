@@ -1,13 +1,17 @@
 # FLOOR-RFC-001 — The floor protocol: an order book for speaking turns
 
-- **Status:** Draft rev 8.1 — trial-hardened, human-contact tested,
-  interaction-model settled; observation window closed 2026-08-19.
-  Rev 8.1 closes the two seams from Mica's rev-8 artifact review
-  (2026-08-28): reaffirmation is now a named wire act (§2.2), and the
-  testing ladder's stage 0 is split into rhythm observation vs.
-  counterfactual shadow — the two instruments the earlier text
-  conflated — with identifier-handling named as a disclosure
-  obligation in its own right.
+- **Status:** Draft rev 9 — adds the stage-0a calibration block: the
+  rhythm-observation backscroll harvest (2026-08-19) measured real-room
+  rhythm against the trial rig's assumptions, and one published finding
+  was corrected against it (2026-08-25, §12 calibration); also folds
+  Mica's rev-8.1 nonblocking carry (§9: hold/decline reasons are
+  closed/bounded protocol values). Rev 8.1 (APPROVED by Mica
+  2026-08-28 at `2cb0637`) closed the two rev-8 artifact-review seams:
+  reaffirmation named as a wire act (§2.2), and stage 0 split into
+  rhythm observation vs. counterfactual shadow with
+  identifier-handling a disclosure obligation in its own right. Rev 8
+  was: trial-hardened, human-contact tested, interaction-model settled;
+  observation window closed 2026-08-19.
   Founding RFC for `anima-research/floor-control`; revised against ten
   findings from the live multi-agent trial (2026-08-11 → 08-14) and
   Mica's rulings on them (2026-08-13/14), then reconfirmed by the
@@ -23,7 +27,7 @@
   order-book formulation); protocol freeze, identity/registry design, and
   cautions by Sol; precedent curation by Sol; trial review and phase-3
   rulings by Mica.
-- **Date:** 2026-08-06 · rev 5: 2026-08-14 · rev 6: 2026-08-18 · rev 7: 2026-08-18 · rev 8: 2026-08-19 · rev 8.1: 2026-08-28
+- **Date:** 2026-08-06 · rev 5: 2026-08-14 · rev 6: 2026-08-18 · rev 7: 2026-08-18 · rev 8: 2026-08-19 · rev 8.1: 2026-08-28 · rev 9: 2026-08-28
 - **Decision record:** four frames in two days, kept so founding main
   encodes none of the stale ones: *manual-as-definition* (8/5, Sol's lean)
   → *automated-as-definition* (8/6 AM, antra: fluid rooms must not be
@@ -273,7 +277,13 @@ the service does not own anyone's attention.
 **Quiet-room liveness** (FINDINGS 2 + 7; rulings by Mica). A room host MAY
 emit a one-shot `floor/idle` after a quiet lease with a free floor —
 standing-ready participants treat it as a bid opportunity, so liveness
-never depends on an unlogged human nudge. The one-shot fires once per
+never depends on an unlogged human nudge. The quiet lease is
+rhythm-calibrated, not universal: the trial's 60 s default is tuned to a
+standing-ready bot fleet, and a real inhabited room is "quiet" by that
+definition ~17 times a day (§12 calibration) — an `idleAfterMs` for an
+inhabited room derives from that room's observed gap distribution (p90
+natural gap, roughly 20+ minutes in the measured rooms), or `floor/idle`
+stays a lab construct there. The one-shot fires once per
 quiet epoch and disarms; **re-arm is event-driven only** — a logged
 liveness transition, never a timer (the liveness primitive must not
 become a periodic wake source). **A genuine participant join is a logged
@@ -307,7 +317,11 @@ the first implementations, not a closed set)
   `speechLeaseMs` (default 30s from acceptance — the trial's lease sweep:
   10s collapses below sustained relay median, 60s buys nothing; cadence
   is participant-bound), per-readiness `acceptTtlMs`, backoff base/cap,
-  `lapseAfterIgnoredOffers` (3), `degradedAfterNoAcceptStreak` (3).
+  `lapseAfterIgnoredOffers` (3), `degradedAfterNoAcceptStreak` (3),
+  `burstReleaseMs` (default 2500 ms; agent leases only, see §6 emission
+  coalescing — the knob MUST NOT apply to human/gesture-derived
+  participants, §12 calibration), `idleAfterMs` (60 s lab default;
+  inhabited rooms derive from observed rhythm, §3).
 - **Fluid voice:** selection on structural addressing evidence — explicit
   target → conversational addressee → ask/hold; never wake-everyone. The
   transport enforces carrier-clear before synthesis on its own path.
@@ -387,6 +401,23 @@ of the two kinds of participant who think:
   release, no judgment between) should be offered as one atomic adapter
   operation — the trial measured four wire messages per spoken turn,
   which is fine for machines and absurd for anything else.
+- **Emission coalescing (rev 9): an agent turn is a burst, and the burst
+  is one emission.** Harness-driven agents emit a turn as several rapid
+  transport sends (measured: self-continuation p50 0.4 s, sharply
+  bimodal — §12 calibration). All sends inside one grant are one
+  emission; the atomic adapter operation above is the preferred carrier.
+  Where an adapter cannot batch, the arbiter holds the floor
+  `burstReleaseMs` (default 2500 ms) after each send before treating the
+  turn as released — at 2.5 s the measured cost is near zero (a handful
+  of handoffs per hundreds delayed ~0.3 s median) and most genuine
+  continuations coalesce. **This timer is for agent leases only.** Human
+  self-continuation has no detectable burst boundary: its gap
+  distribution (p50 ~52 s) sits on top of the handoff distribution, so
+  every threshold either fragments human turns or taxes real handoffs —
+  there is no knob setting, which is measurement confirming the model
+  above: human turn structure, where the floor ever needs it, derives
+  from native gestures (the typing indicator is the text analog of VAD
+  utterance-end), never from message spacing.
 
 **Adapter honesty (trial findings, portal relay).** Transports lie in
 small ways: the trial found deliveries missing thread ids (portal#17) and
@@ -453,7 +484,12 @@ which is what `subjectRef` exists for.
 - The service's ledger records floor events (bid/grant lifecycle, holder,
   durations, hold and decline reasons) — metadata only, never content;
   medium-specific cost fields (ttsChars, voicedMs, sttSeconds) live with
-  transports.
+  transports. Reasons stay on the metadata side of that line only while
+  they remain **closed, bounded protocol values** (`stale-head`,
+  `content`, …): a free-text reason field would be content wearing a
+  reason's name, and any implementation that admits one MUST give it the
+  same minimization treatment as message text (rev 9, carrying Mica's
+  rev-8.1 review note).
 
 ## 10. Exit gates
 
@@ -608,7 +644,13 @@ run in consented form via the 14-day historical-backscroll harvest
 real book against the live channel and ledgers what it *would* have
 granted, still sending nothing; this is where fairness order diffs
 against actual speaking order (instrument pending; the harvested-data
-fairness-diff replayer is its dry precursor). Nobody's behavior changes
+fairness-diff replayer is its dry precursor). Its credible live form is
+**real shadow bids**: consenting agents' adapters place genuine bids
+into a book that grants nothing. The replayer's shakedown is why this
+matters — synthesized human bids proved calibration artifacts (the
+δ-sweep swung the human intervention rate 14× on one free parameter,
+2026-08-25), so counterfactual claims about humans want gesture-derived
+bids or none at all. Nobody's behavior changes
 on either rung. Prerequisites, hard for both: a send-rate circuit
 breaker capping the ROOM's aggregate output across every outbound
 transport, and a ledger content audit against §9's metadata-only
@@ -628,6 +670,34 @@ one-wake/one-synthesis/barge-in-boundary as protocol behavior with zero
 audio infrastructure. The lab room (this trial channel) is retained
 alongside all stages — controlled probes and adversarial profiles don't
 transfer to rooms where people live.
+
+**Stage-0a calibration — what real rooms taught the knobs** (backscroll
+harvest 2026-08-19, offered by antra in lieu of a live listening run —
+rung 0a exercised on consented historical data:
+14 days × 2 channels, 694 messages, 26 speakers; records are
+timestamp/author/bytes only — no text field exists to store, per the §9
+audit discipline; disclosure posted in the analyzed channel with a
+standing exclusion offer). Four calibration findings, one of which was
+**corrected** after first publication (2026-08-25) — the correction is
+part of the record:
+
+| # | Measured | Knob consequence |
+|---|---|---|
+| C1 | An inhabited room is "quiet >60 s" ~17×/day (median natural gap 45 s; median quiet stretch 5 min; p90 ≈ 2 h) | 60 s `idleAfterMs` is a bot-fleet tuning; inhabited rooms derive idle-after from observed rhythm (p90 gap, ~20+ min) or keep `floor/idle` lab-only (§3) |
+| C2 | Human speaker-handoff latency p50 60–98 s across the two rooms — 3–4× any 15–20 s accept window | Confirms accept-TTL-per-`readinessKind` (§2.4) and the rule that human participation carries no accept step at all (§6) |
+| C3 | **Corrected.** As published: "median self-continue gap 1.3 s; a turn is a burst; release on burst-end." That figure pooled harness-paced agent sends with human messages. Split: agents p50 **0.4 s** (sharply bimodal — harness burst, then genuine new turns); humans p50 **52 s**, spread smoothly 10 s → hours, **no valley** — human self-gaps overlap the handoff distribution (handoff p25 = 32 s). A threshold sweep (1–60 s) fails at every setting for humans: 10 s fragments 86 % of human continuations, 60 s delays half of real handoffs ~30 s median | Burst-end release is an **agent-only** mechanism: atomic adapter op preferred, `burstReleaseMs` ≈ 2.5 s fallback (§6 emission coalescing). For humans the text-VAD signal is the typing indicator, never message spacing — hard confirmation of §6's native-gesture model |
+| C4 | Turns are short: p50 393 B, p90 1.7 KB | Prepared-bid sizing realistic as designed (§2.1) |
+
+Carried caveats: history under-represents deleted/edited messages (this
+is the rhythm of what remains); threads excluded; single server;
+n = 101 human self-continuation pairs behind C3's human column. Author
+classification was verified against the member registry (2026-08-25):
+every `user:` row in the corpus is a human account; residents post via
+webhook/persona identities. The C3 correction is also a method note the
+next measurement inherits: **rhythm statistics over mixed human+agent
+rooms must split by participant kind before calibrating any knob** — the
+two populations differ by two orders of magnitude and the pooled number
+described neither.
 
 Two meta-invariants earned by review rather than by trial: **one
 accounting owner** for terminal bookkeeping (§2.3, Mica's delta-review
