@@ -83,6 +83,22 @@ describe('fairness-diff replayer', () => {
     assert.deepEqual(JSON.parse(JSON.stringify(r1)), JSON.parse(JSON.stringify(r2)));
   });
 
+  it('S9: fairness uses a per-turn basis — a coalesced burst is one turn, matching its one grant', () => {
+    const a = 'webhook:BotA';
+    const h = 'user:1111';
+    const r = replay([
+      msg(T0, a), msg(T0 + 400, a), msg(T0 + 900, a), // one agent turn (burst)
+      msg(T0 + 30_000, h), msg(T0 + 31_000, h),       // two human turns (C3: no human bursts)
+    ]);
+    assert.equal(r.fairness.byKind.agent.messages, 3);
+    assert.equal(r.fairness.byKind.agent.turns, 1);
+    assert.equal(r.fairness.byKind.agent.grants, 1);
+    assert.equal(r.fairness.byKind.human.turns, 2);
+    // Like-for-like: turn share equals grant share under zero intervention.
+    assert.equal(r.interventionRate, 0);
+    assert.equal(r.fairness.topAuthorTurnShare, r.fairness.topAuthorGrantShare);
+  });
+
   it('S7: the public aggregate carries no per-identity rows and no outcome stream', () => {
     const r = replay([msg(T0, 'user:1111'), msg(T0 + 10_000, 'webhook:BotA')]);
     const pub = publicAggregate(r) as Record<string, unknown>;

@@ -128,8 +128,15 @@ export interface FairnessDiffReport {
   };
   fairness: {
     topAuthorMessageShare: number;
+    /** Organic turns: the record stream with the same burst rule the floor
+     *  applies — agent self-continuations within burstReleaseMs collapse
+     *  into one turn; every human message is its own turn (C3). This is
+     *  the like-for-like denominator for grant shares: a burst is one
+     *  grant, so comparing grants against raw MESSAGES understates bursty
+     *  speakers structurally (the shakedown's item-5 subtlety). */
+    topAuthorTurnShare: number;
     topAuthorGrantShare: number;
-    byKind: Record<ParticipantKind, { messages: number; grants: number }>;
+    byKind: Record<ParticipantKind, { messages: number; turns: number; grants: number }>;
   };
   clockFit: {
     quietEpochs: number;
@@ -356,19 +363,31 @@ export function replay(rawRecords: RhythmRecord[], overrides: Partial<ReplayKnob
 
   const msgCounts = new Map<string, number>();
   for (const r of records) msgCounts.set(r.authorId, (msgCounts.get(r.authorId) ?? 0) + 1);
+  // Organic turns: same burst rule the floor applies (agent-only, C3).
+  const turnCounts = new Map<string, number>();
+  for (let k = 0; k < records.length; k++) {
+    const r = records[k];
+    const prev = k > 0 ? records[k - 1] : null;
+    const continuesBurst = prev !== null
+      && prev.authorId === r.authorId
+      && kindOf(r.authorId) === 'agent'
+      && r.at - prev.at <= knobs.burstReleaseMs;
+    if (!continuesBurst) turnCounts.set(r.authorId, (turnCounts.get(r.authorId) ?? 0) + 1);
+  }
   const grantCounts = new Map<string, number>();
   for (const [id, row] of Object.entries(perIdentity)) grantCounts.set(id, row.grants);
   const share = (m: Map<string, number>): number => {
     const total = [...m.values()].reduce((a, b) => a + b, 0);
     return total === 0 ? 0 : Math.max(...m.values()) / total;
   };
-  const fairnessByKind: Record<ParticipantKind, { messages: number; grants: number }> = {
-    human: { messages: 0, grants: 0 }, agent: { messages: 0, grants: 0 },
+  const fairnessByKind: Record<ParticipantKind, { messages: number; turns: number; grants: number }> = {
+    human: { messages: 0, turns: 0, grants: 0 }, agent: { messages: 0, turns: 0, grants: 0 },
   };
   for (const row of Object.values(perIdentity)) {
     fairnessByKind[row.kind].messages += row.messages;
     fairnessByKind[row.kind].grants += row.grants;
   }
+  for (const [id, turns] of turnCounts) fairnessByKind[kindOf(id)].turns += turns;
 
   let quietEpochs = 0;
   for (let k = 1; k < records.length; k++) {
@@ -403,6 +422,7 @@ export function replay(rawRecords: RhythmRecord[], overrides: Partial<ReplayKnob
     },
     fairness: {
       topAuthorMessageShare: share(msgCounts),
+      topAuthorTurnShare: share(turnCounts),
       topAuthorGrantShare: share(grantCounts),
       byKind: fairnessByKind,
     },
