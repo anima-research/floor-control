@@ -15,7 +15,7 @@ import { FluidFairnessLogic } from '../src/logics.js';
 import { FloorRoomHost } from './host.js';
 import { ScriptedBot } from './bot.js';
 import { PortalTransport } from './portal-transport.js';
-import { wireTransportOptions, makeShutdownOwner } from './rig-wiring.js';
+import { wireTransportOptions, installShutdown } from './rig-wiring.js';
 import { parseDuration } from './band.js';
 
 function arg(name: string, fallback: string): string {
@@ -134,7 +134,10 @@ for (let i = 1; i <= botCount; i++) {
 // SIGINT and SIGTERM converge on one idempotent owner: the breaker's
 // terminal receipt lands first (a container stop is SIGTERM — it must
 // not lose the suppressed count), then transports close deliberately.
-const shutdown = makeShutdownOwner({
+// Registration goes through installShutdown so the binding itself is
+// the tested seam — no bare process.on here.
+installShutdown({
+  signals: process,
   breaker: wiring.breaker,
   close: [async () => host.stop(), ...[hostTransport, ...botTransports].map((t) => () => t.close())],
   log: () =>
@@ -144,5 +147,3 @@ const shutdown = makeShutdownOwner({
     ),
   exit: (code) => process.exit(code),
 });
-process.on('SIGINT', () => void shutdown());
-process.on('SIGTERM', () => void shutdown());

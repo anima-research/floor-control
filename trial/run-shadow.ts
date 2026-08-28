@@ -12,6 +12,7 @@
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { PortalTransport } from './portal-transport.js';
+import { installShutdown } from './rig-wiring.js';
 import { startShadow } from './shadow.js';
 
 function arg(name: string, fallback: string): string {
@@ -60,15 +61,11 @@ const shadow = startShadow(transport, (entry) => appendFileSync(ledgerPath, JSON
 await transport.connect();
 console.log(`shadow observing channel=${channelId} → ${ledgerPath} (no sends, ever)`);
 
-// SIGINT and SIGTERM converge; re-entry is a no-op.
-let stopping = false;
-const shutdown = () => {
-  if (stopping) return;
-  stopping = true;
-  void shadow.stop().finally(() => {
-    console.log(`shadow closed; ledger ${ledgerPath} survives.`);
-    process.exit(0);
-  });
-};
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+// SIGINT and SIGTERM converge on one idempotent owner, registered
+// through the tested seam — no bare process.on here.
+installShutdown({
+  signals: process,
+  close: [() => shadow.stop()],
+  log: () => console.log(`shadow closed; ledger ${ledgerPath} survives.`),
+  exit: (code) => process.exit(code),
+});

@@ -14,7 +14,7 @@ import { join } from 'node:path';
 
 import { PortalTransport } from '../trial/portal-transport.js';
 import { SendBreaker } from '../trial/send-breaker.js';
-import { wireTransportOptions, makeShutdownOwner } from '../trial/rig-wiring.js';
+import { wireTransportOptions, makeShutdownOwner, installShutdown } from '../trial/rig-wiring.js';
 
 function makeRig(botNames: string[], sendBudget?: { maxSends: number; windowMs: number }) {
   const dir = mkdtempSync(join(tmpdir(), 'floor-wiring-'));
@@ -137,4 +137,44 @@ test('SIGINT and SIGTERM converge on one shutdown owner: tripped → exactly one
   await makeShutdownOwner({ breaker: idle, exit: (c) => idleExits.push(c) })();
   assert.equal(quiet.filter((a) => a.kind === 'send-breaker-final').length, 0);
   assert.deepEqual(idleExits, [0]);
+});
+
+test('signal registration is the tested seam: installShutdown binds BOTH signals to one idempotent owner (removing either binding goes red)', async () => {
+  const handlers = new Map<string, () => void>();
+  const signals = {
+    on: (sig: 'SIGINT' | 'SIGTERM', h: () => void) => {
+      handlers.set(sig, h);
+    },
+  };
+  const anomalies: Record<string, unknown>[] = [];
+  const breaker = new SendBreaker({ maxSends: 1, windowMs: 60_000 }, (e) => anomalies.push(e));
+  assert.equal(breaker.admit(1_000, 'floor-service', async () => 'rm_x'), 'admitted');
+  assert.equal(breaker.admit(1_001, 'floor-service', async () => 'rm_x'), 'tripped');
+  await breaker.noticeSettlement();
+
+  const closed: string[] = [];
+  const exits: number[] = [];
+  installShutdown({
+    signals,
+    breaker,
+    close: [async () => closed.push('transport')],
+    exit: (code) => exits.push(code),
+  });
+  assert.deepEqual([...handlers.keys()].sort(), ['SIGINT', 'SIGTERM'], 'both termination signals are registered');
+
+  // A container stop arrives first — the exact regression under test:
+  // SIGTERM alone must land the terminal receipt and close everything.
+  handlers.get('SIGTERM')!();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(anomalies.filter((a) => a.kind === 'send-breaker-final').length, 1, 'SIGTERM alone preserves the suppressed count');
+  assert.deepEqual(closed, ['transport']);
+  assert.deepEqual(exits, [0]);
+
+  // The other signal afterwards proves both dispatch to the SAME owner:
+  // separate owners would double the receipt, the closes, and the exit.
+  handlers.get('SIGINT')!();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(anomalies.filter((a) => a.kind === 'send-breaker-final').length, 1, 'one owner across both signals');
+  assert.deepEqual(closed, ['transport']);
+  assert.deepEqual(exits, [0]);
 });

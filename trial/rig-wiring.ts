@@ -60,6 +60,35 @@ export function makeShutdownOwner(opts: {
   };
 }
 
+/** The slice of `process` the shutdown wiring needs — injectable so the
+ *  registration itself is testable, not just the owner it dispatches to
+ *  (Mica re-review 2026-08-28: deleting the runners' SIGTERM
+ *  registrations left the suite green; the binding is now a tested seam,
+ *  and the runners register through it and nowhere else). */
+export interface SignalHost {
+  on(signal: 'SIGINT' | 'SIGTERM', handler: () => void): unknown;
+}
+
+/**
+ * Build the shutdown owner AND bind both termination signals to it in
+ * one act — a runner cannot take the owner without the bindings.
+ * Conformance drives this with a fake SignalHost: both signals must be
+ * registered, dispatch to the one idempotent owner, and removing either
+ * registration below turns the wiring test red.
+ */
+export function installShutdown(opts: {
+  signals: SignalHost;
+  breaker?: SendBreaker;
+  close?: Array<() => void | Promise<void>>;
+  log?: () => void;
+  exit?: (code: number) => void;
+}): () => Promise<void> {
+  const shutdown = makeShutdownOwner(opts);
+  opts.signals.on('SIGINT', () => void shutdown());
+  opts.signals.on('SIGTERM', () => void shutdown());
+  return shutdown;
+}
+
 export function wireTransportOptions(
   rig: RigSpec,
   opts: {
