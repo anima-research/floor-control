@@ -101,6 +101,114 @@ test('§9: a dropped protocol-band line keeps a preview; dropped room-band conte
   }
 });
 
+test('trip-notice settlement is owned: a failed notice cannot land after the window resets (probe: one → notice-fail → after-reset → notice-success)', async () => {
+  const { t, anomalies, cleanup } = makeTransport({ maxSends: 1, windowMs: 250 });
+  // The notice's FIRST attempt fails; its retry (2s later, inside
+  // rawSend) succeeds. Under the old fire-and-forget notice, the window
+  // reset during those 2s and ordinary sends resumed before the notice
+  // landed — Mica's probe order. The breaker now refuses to reset until
+  // the notice settles, and the tripping call awaits that settlement.
+  const sent: { content?: string }[] = [];
+  let noticeAttempts = 0;
+  (t as unknown as { client: { sendMessage(p: { content?: string }): Promise<{ messageId: string }> } }).client = {
+    sendMessage: async (p) => {
+      if (/send budget exhausted/.test(p.content ?? '') && ++noticeAttempts === 1) {
+        throw new Error('relay hiccup on the notice');
+      }
+      sent.push(p);
+      return { messageId: `rm_chan-room_${sent.length}` };
+    },
+  };
+  try {
+    assert.notEqual(await t.sendRoom('one'), '');
+    assert.equal(sent.length, 1);
+
+    // Trips; the call must not resolve while the notice is unsettled.
+    const trip = t.sendRoom('two');
+
+    // Window fully drained, notice still in flight (first attempt
+    // failed, retry pending) — sending must NOT resume.
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(await t.sendRoom('after-reset?'), '', 'no resume while the notice is unsettled');
+    assert.equal(sent.length, 1, 'nothing has reached the room since the trip');
+
+    assert.equal(await trip, '');
+    assert.match(sent[1]?.content ?? '', /send budget exhausted/, 'the tripping call resolved only after the notice settled');
+
+    assert.notEqual(await t.sendRoom('resumed'), '', 'sending resumes once settled + drained');
+    assert.deepEqual(
+      sent.map((p) => (/send budget exhausted/.test(p.content ?? '') ? 'notice' : p.content)),
+      ['one', 'notice', 'resumed'],
+      'the notice strictly precedes every post-reset send',
+    );
+    const resets = anomalies.filter((a) => a.kind === 'send-breaker-reset');
+    assert.equal(resets.length, 1);
+    assert.equal(resets[0].suppressed, 2, 'the tripping send and the refused resume probe are both counted');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a notice that never lands is truthfully abandoned before the trip call returns', async () => {
+  const { t, anomalies, cleanup } = makeTransport({ maxSends: 1, windowMs: 100 });
+  // Ordinary sends land; only the notice finds the relay down — both of
+  // its attempts fail, so it settles by abandonment, with a receipt.
+  const sent: { content?: string }[] = [];
+  (t as unknown as { client: { sendMessage(p: { content?: string }): Promise<{ messageId: string }> } }).client = {
+    sendMessage: async (p) => {
+      if (/send budget exhausted/.test(p.content ?? '')) throw new Error('relay down for the notice');
+      sent.push(p);
+      return { messageId: `rm_chan-room_${sent.length}` };
+    },
+  };
+  try {
+    assert.notEqual(await t.sendRoom('one'), '');
+    assert.equal(await t.sendRoom('two'), '', 'the trip call resolves despite the undeliverable notice');
+    assert.equal(anomalies.filter((a) => a.kind === 'send-breaker-notice-abandoned').length, 1);
+    // Abandonment settles the notice: with the window long drained,
+    // sending resumes rather than deadlocking behind a notice that
+    // will never land.
+    assert.notEqual(await t.sendRoom('three'), '');
+    assert.equal(anomalies.filter((a) => a.kind === 'send-breaker-reset').length, 1);
+    assert.deepEqual(sent.map((p) => p.content), ['one', 'three'], 'the abandoned notice never reached the room');
+  } finally {
+    cleanup();
+  }
+});
+
+test('closing while tripped emits ONE bounded terminal receipt carrying the suppressed count — and no room send', async () => {
+  const { t, sent, anomalies, cleanup } = makeTransport({ maxSends: 1, windowMs: 60_000 });
+  try {
+    await t.sendRoom('one');
+    assert.equal(await t.sendRoom('two'), ''); // trips (notice goes out)
+    assert.equal(await t.sendRoom('three'), ''); // suppressed
+    assert.equal(sent.length, 2, 'one admitted send + the notice');
+
+    await t.close();
+    const finals = anomalies.filter((a) => a.kind === 'send-breaker-final');
+    assert.equal(finals.length, 1);
+    assert.equal(finals[0].suppressed, 2, 'the tripping send and the suppressed send both survive shutdown');
+    assert.equal(finals[0].noticeSettled, true);
+    assert.equal(sent.length, 2, 'the terminal receipt is ledger-only — no room send');
+
+    await t.close();
+    assert.equal(anomalies.filter((a) => a.kind === 'send-breaker-final').length, 1, 'idempotent across repeated closes');
+  } finally {
+    cleanup();
+  }
+});
+
+test('closing untripped emits no terminal receipt — the receipt marks state at risk, not routine shutdown', async () => {
+  const { t, anomalies, cleanup } = makeTransport({ maxSends: 5, windowMs: 1000 });
+  try {
+    await t.sendRoom('one');
+    await t.close();
+    assert.equal(anomalies.filter((a) => a.kind === 'send-breaker-final').length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
 test('§9 by construction: a shadow record has no text field, only byte length', async () => {
   const { ShadowRecorder } = await import('../trial/shadow.js');
   const records: Record<string, unknown>[] = [];

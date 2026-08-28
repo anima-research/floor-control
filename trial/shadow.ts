@@ -12,7 +12,7 @@
  * §9 by construction: the record shape has no text field — the recorder
  * cannot leak what it never accepts.
  */
-import type { InboundMessage } from './transport.js';
+import type { InboundMessage, RoomTransport } from './transport.js';
 
 export interface SpeechRhythmRecord {
   kind: 'speech-rhythm';
@@ -26,6 +26,26 @@ export interface SpeechRhythmRecord {
   gapMs: number | null;
   /** Did the speaker change from the previous message on this surface? */
   transition: boolean;
+}
+
+/**
+ * The runner core: everything shadow mode does with a transport, in one
+ * injectable function — run-shadow.ts calls this and nothing else with
+ * the transport. The claim that stage 0 sends nothing must be
+ * EXECUTABLE evidence, not a comment (Mica review 2026-08-28, seam 4):
+ * the conformance test hands this a transport whose send methods are
+ * instrumented, drives observed traffic and shutdown through it, and
+ * asserts zero room/control sends. Note the deliberate shape — the
+ * full RoomTransport is accepted, sends available, and only
+ * onMessage/close are ever touched.
+ */
+export function startShadow(
+  transport: RoomTransport,
+  ledger: (entry: SpeechRhythmRecord) => void,
+): { recorder: ShadowRecorder; stop: () => Promise<void> } {
+  const recorder = new ShadowRecorder(ledger);
+  transport.onMessage((m) => recorder.observe(m));
+  return { recorder, stop: () => transport.close() };
 }
 
 export class ShadowRecorder {

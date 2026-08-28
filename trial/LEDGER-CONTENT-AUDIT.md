@@ -22,6 +22,8 @@ through it, rather than asserting it.
 | `identity-refusal` (anomaly) | derived id, fingerprint pair, raw attribution | metadata |
 | `send-drop` (anomaly) | persona, error, **content handling below** | repaired |
 | `send-breaker-trip` / `-reset` (anomaly) | persona, budget, timestamps, suppressed count | metadata |
+| `send-breaker-final` (anomaly) | trip timestamp, suppressed count, notice settlement — shutdown-while-tripped snapshot | metadata |
+| `send-breaker-notice-abandoned` (anomaly) | persona, timestamp — the trip notice never landed | metadata |
 | `speech-rhythm` (shadow) | at, authorId, messageId, byte length, surface, thread presence | metadata — see below |
 
 ## The one repair
@@ -49,8 +51,12 @@ redacting the ledger.
 author id, message id, **byte length**, band classification. No text
 field exists in the record shape — the recorder cannot leak what it
 never accepts (`trial/shadow.ts`, pinned by test). The shadow runner
-never sends: it holds no reference to the transport's send methods, and
-the run manifest declares `mode: 'shadow'`.
+never sends — and that claim is executable, not asserted: the runner
+core (`startShadow`) is handed a transport whose send methods are fully
+available, and conformance drives observed traffic plus shutdown
+through it asserting zero room/control sends
+(`test/shadow-runner.test.ts`; adding any send turns it red). The run
+manifest declares `mode: 'shadow'`.
 
 Remaining before a live-channel shadow run is *social*, not technical:
 target-channel choice, disclosure to its regulars, and read access for

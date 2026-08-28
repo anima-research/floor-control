@@ -12,7 +12,7 @@
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { PortalTransport } from './portal-transport.js';
-import { ShadowRecorder } from './shadow.js';
+import { startShadow } from './shadow.js';
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -43,8 +43,6 @@ appendFileSync(
   }) + '\n',
 );
 
-const recorder = new ShadowRecorder((entry) => appendFileSync(ledgerPath, JSON.stringify(entry) + '\n'));
-
 const transport = new PortalTransport({
   url: rigUrl,
   credsFile,
@@ -53,12 +51,18 @@ const transport = new PortalTransport({
   ...(threadId ? { controlThreadId: threadId } : {}),
   onAnomaly: (entry) => appendFileSync(ledgerPath, JSON.stringify(entry) + '\n'),
 });
-transport.onMessage((m) => recorder.observe(m));
+
+// All transport use goes through the tested runner core — this script
+// adds only the manifest and the connection (shadow-runner conformance
+// proves the core touches no send path).
+const shadow = startShadow(transport, (entry) => appendFileSync(ledgerPath, JSON.stringify(entry) + '\n'));
 
 await transport.connect();
 console.log(`shadow observing channel=${channelId} → ${ledgerPath} (no sends, ever)`);
 
 process.on('SIGINT', () => {
-  console.log(`shadow closed; ledger ${ledgerPath} survives.`);
-  process.exit(0);
+  void shadow.stop().finally(() => {
+    console.log(`shadow closed; ledger ${ledgerPath} survives.`);
+    process.exit(0);
+  });
 });

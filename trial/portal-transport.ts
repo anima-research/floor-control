@@ -30,6 +30,9 @@
 import { readFileSync } from 'node:fs';
 import { PortalClient } from '@animalabs/portal-client';
 import type { InboundMessage, RoomTransport } from './transport.js';
+import { SendBreaker, type SendBudget } from './send-breaker.js';
+
+export { SendBreaker, type SendBudget } from './send-breaker.js';
 
 export interface PortalTransportOptions {
   url: string;
@@ -44,14 +47,16 @@ export interface PortalTransportOptions {
   /** Receives anomaly records (identity refusals, send drops) so the run
    *  can ledger them — a drop that only reaches a console is not a receipt. */
   onAnomaly?: (entry: Record<string, unknown>) => void;
-  /** Send-rate circuit breaker — blast-radius control for live/social
-   *  channels (shadow-mode prerequisite; the cc-spawner burst and the F14
-   *  churn are the two measured failure shapes). When the rolling window
-   *  fills: one final plain notice is sent, then hard silence until the
-   *  window drains; every suppressed send is counted and the trip/reset
-   *  pair is ledgered via onAnomaly. Omit for no breaker (lab default —
-   *  scripted stress epochs legitimately exceed any social-channel cap). */
-  sendBudget?: SendBudget;
+  /** Send-rate circuit breaker (see send-breaker.ts for the contract).
+   *  The budget belongs to the ROOM: a rig with several outbound
+   *  transports must pass the SAME SendBreaker instance to each, or the
+   *  other senders bypass the cap (Mica review 2026-08-28, seam 1) —
+   *  rig-wiring.ts is the production path that shares one. A plain
+   *  budget builds a transport-private breaker, correct only when this
+   *  transport is the room's sole automated sender. Omit for no breaker
+   *  (lab default — scripted stress epochs legitimately exceed any
+   *  social-channel cap). */
+  sendBudget?: SendBudget | SendBreaker;
 }
 
 const CONTROL_PREFIXES = ['!floor', '⟨floor⟩'];
@@ -66,12 +71,6 @@ function previewOf(content: string): { contentPreview: string } | { contentBytes
   return { contentBytes: Buffer.byteLength(content, 'utf8'), contentWithheld: true };
 }
 
-export interface SendBudget {
-  /** Max sends inside any rolling window; 'off' disables the breaker. */
-  maxSends: number;
-  windowMs: number;
-}
-
 export class PortalTransport implements RoomTransport {
   readonly locator: string;
   readonly provenance: string;
@@ -83,10 +82,13 @@ export class PortalTransport implements RoomTransport {
   /** Derived participantId → first-seen raw fingerprint, for the residual
    *  `webhook:` last-resort identities only (see header note 3). */
   private fingerprints = new Map<string, string>();
-  /** Send timestamps inside the breaker's rolling window. */
-  private sendTimes: number[] = [];
-  /** Non-null while tripped: suppressed-send counter for the reset receipt. */
-  private tripped: { at: number; suppressed: number } | null = null;
+  /** Room send budget — possibly shared with sibling transports. */
+  private readonly breaker: SendBreaker | null;
+  /** True when this transport built its own breaker from a plain budget
+   *  (then close() emits the terminal receipt; a shared breaker's final
+   *  receipt belongs to the rig's shutdown path, though the call is
+   *  idempotent either way). */
+  private readonly ownsBreaker: boolean;
 
   constructor(private opts: PortalTransportOptions) {
     const creds = JSON.parse(readFileSync(opts.credsFile, 'utf8')) as {
@@ -94,6 +96,10 @@ export class PortalTransport implements RoomTransport {
       token: string;
     };
     this.personaId = creds.personaId;
+    const sb = opts.sendBudget;
+    this.breaker =
+      sb instanceof SendBreaker ? sb : sb ? new SendBreaker(sb, (e) => this.opts.onAnomaly?.(e)) : null;
+    this.ownsBreaker = Boolean(sb) && !(sb instanceof SendBreaker);
     this.locator = `portal://${opts.roomChannelId}`;
     this.provenance = `portal-relay:${new URL(opts.url).host}`;
     this.client = new PortalClient({
@@ -239,56 +245,25 @@ export class PortalTransport implements RoomTransport {
     return i >= 0 ? relayId.slice(i + 1) : relayId;
   }
 
-  /** Rolling-window send breaker (see PortalTransportOptions.sendBudget).
-   *  Returns true when this send may proceed. */
-  private breakerAdmits(now: number): boolean {
-    const budget = this.opts.sendBudget;
-    if (!budget) return true;
-    this.sendTimes = this.sendTimes.filter((t) => now - t < budget.windowMs);
-    if (this.tripped) {
-      if (this.sendTimes.length < budget.maxSends) {
-        // Window drained: resume, and say truthfully what was dropped.
-        this.opts.onAnomaly?.({
-          kind: 'send-breaker-reset',
-          at: now,
-          persona: this.opts.personaName,
-          trippedAt: this.tripped.at,
-          suppressed: this.tripped.suppressed,
-        });
-        this.tripped = null;
-        return true;
-      }
-      this.tripped.suppressed += 1;
-      return false;
-    }
-    if (this.sendTimes.length >= budget.maxSends) {
-      this.tripped = { at: now, suppressed: 1 };
-      this.opts.onAnomaly?.({
-        kind: 'send-breaker-trip',
-        at: now,
-        persona: this.opts.personaName,
-        maxSends: budget.maxSends,
-        windowMs: budget.windowMs,
-      });
-      // One final plain notice — the room deserves to know the arbiter went
-      // quiet and why; after this line, hard silence until the window drains.
-      void this.rawSend({
-        channelId: this.opts.roomChannelId,
-        content: `[floor service: send budget exhausted (${budget.maxSends}/${Math.round(budget.windowMs / 1000)}s) — going quiet until the window drains; sends in between are being dropped and counted]`,
-      });
-      return false;
-    }
-    return true;
-  }
-
-  /** One retry, then log-and-drop. Never throws into a fire-and-forget. */
+  /** One retry, then log-and-drop. Never throws into a fire-and-forget.
+   *  Suppressed sends are counted, not individually ledgered — a runaway
+   *  must not flood the ledger through the very mechanism that contains
+   *  it (the trip/reset receipts carry the counts). The tripping call
+   *  awaits the final notice's settlement before returning, so a
+   *  retrying notice can never land after ordinary sending has resumed
+   *  — the breaker also refuses to reset until then. */
   private async safeSend(params: Parameters<PortalClient['sendMessage']>[0]): Promise<string> {
-    const now = Date.now();
-    // Suppressed sends are counted, not individually ledgered — a runaway
-    // must not flood the ledger through the very mechanism that contains
-    // it. The trip/reset receipts carry the counts.
-    if (!this.breakerAdmits(now)) return '';
-    this.sendTimes.push(now);
+    if (this.breaker) {
+      const verdict = this.breaker.admit(Date.now(), this.opts.personaName, (text) =>
+        // The breaker's own notice must not re-enter the breaker.
+        this.rawSend({ channelId: this.opts.roomChannelId, content: text }),
+      );
+      if (verdict === 'tripped') {
+        await this.breaker.noticeSettlement();
+        return '';
+      }
+      if (verdict === 'suppressed') return '';
+    }
     return this.rawSend(params);
   }
 
@@ -330,6 +305,12 @@ export class PortalTransport implements RoomTransport {
   }
 
   async close(): Promise<void> {
+    // A breaker tripped at shutdown still owes its suppressed count to
+    // the ledger (no room send). Only a transport-private breaker is
+    // finalized here — one transport closing must not stamp a SHARED
+    // breaker's final state while sibling transports are still sending;
+    // the rig's own shutdown path finalizes those.
+    if (this.ownsBreaker) this.breaker?.emitFinalReceipt(Date.now());
     this.client.close?.();
   }
 }
