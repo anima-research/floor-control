@@ -26,6 +26,40 @@ export interface RigWiring {
   breaker?: SendBreaker;
 }
 
+/**
+ * One idempotent shutdown owner for the rig (Mica re-review 2026-08-28):
+ * SIGINT and SIGTERM must converge here — a normal service/container
+ * stop is SIGTERM, and an exit path that skips the breaker's terminal
+ * receipt loses the exact suppressed count the receipt exists to
+ * preserve. The receipt is emitted FIRST (synchronously, ledger-only)
+ * so a close step that hangs cannot cost it; transports are then closed
+ * deliberately rather than by process death. Re-entry (second signal,
+ * double delivery) is a no-op.
+ */
+export function makeShutdownOwner(opts: {
+  breaker?: SendBreaker;
+  /** Closed in order; a step that throws does not stop shutdown. */
+  close?: Array<() => void | Promise<void>>;
+  log?: () => void;
+  exit?: (code: number) => void;
+}): () => Promise<void> {
+  let entered = false;
+  return async () => {
+    if (entered) return;
+    entered = true;
+    opts.breaker?.emitFinalReceipt(Date.now());
+    for (const step of opts.close ?? []) {
+      try {
+        await step();
+      } catch {
+        // Shutdown finishes regardless; the receipt is already down.
+      }
+    }
+    opts.log?.();
+    opts.exit?.(0);
+  };
+}
+
 export function wireTransportOptions(
   rig: RigSpec,
   opts: {

@@ -14,7 +14,7 @@ import { join } from 'node:path';
 
 import { PortalTransport } from '../trial/portal-transport.js';
 import { SendBreaker } from '../trial/send-breaker.js';
-import { wireTransportOptions } from '../trial/rig-wiring.js';
+import { wireTransportOptions, makeShutdownOwner } from '../trial/rig-wiring.js';
 
 function makeRig(botNames: string[], sendBudget?: { maxSends: number; windowMs: number }) {
   const dir = mkdtempSync(join(tmpdir(), 'floor-wiring-'));
@@ -95,4 +95,46 @@ test('the room budget caps AGGREGATE output: a bot cannot spend outside the arbi
   } finally {
     cleanup();
   }
+});
+
+test('SIGINT and SIGTERM converge on one shutdown owner: tripped → exactly one ledger-only final receipt, transports closed; untripped → none', async () => {
+  const anomalies: Record<string, unknown>[] = [];
+  const breaker = new SendBreaker({ maxSends: 1, windowMs: 60_000 }, (e) => anomalies.push(e));
+  assert.equal(breaker.admit(1_000, 'floor-service', async () => 'rm_x'), 'admitted');
+  assert.equal(breaker.admit(1_001, 'floor-service', async () => 'rm_x'), 'tripped');
+  await breaker.noticeSettlement();
+
+  const closed: string[] = [];
+  const exits: number[] = [];
+  const shutdown = makeShutdownOwner({
+    breaker,
+    close: [
+      () => {
+        closed.push('host');
+        throw new Error('a hanging step must not cost the receipt or later closes');
+      },
+      async () => {
+        closed.push('bot');
+      },
+    ],
+    exit: (code) => exits.push(code),
+  });
+  // Both signals land — and a straggler after completion.
+  await Promise.all([shutdown(), shutdown()]);
+  await shutdown();
+
+  const finals = anomalies.filter((a) => a.kind === 'send-breaker-final');
+  assert.equal(finals.length, 1, 'exactly one terminal receipt across repeated signals');
+  assert.equal(finals[0].suppressed, 1);
+  assert.deepEqual(closed, ['host', 'bot'], 'every close step ran once, throwing step included');
+  assert.deepEqual(exits, [0], 'one exit');
+
+  // Untripped rig: shutdown still closes and exits, but no receipt.
+  const quiet: Record<string, unknown>[] = [];
+  const idle = new SendBreaker({ maxSends: 5, windowMs: 1_000 }, (e) => quiet.push(e));
+  assert.equal(idle.admit(1_000, 'floor-service', async () => 'rm_x'), 'admitted');
+  const idleExits: number[] = [];
+  await makeShutdownOwner({ breaker: idle, exit: (c) => idleExits.push(c) })();
+  assert.equal(quiet.filter((a) => a.kind === 'send-breaker-final').length, 0);
+  assert.deepEqual(idleExits, [0]);
 });

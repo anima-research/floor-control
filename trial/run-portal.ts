@@ -15,7 +15,7 @@ import { FluidFairnessLogic } from '../src/logics.js';
 import { FloorRoomHost } from './host.js';
 import { ScriptedBot } from './bot.js';
 import { PortalTransport } from './portal-transport.js';
-import { wireTransportOptions } from './rig-wiring.js';
+import { wireTransportOptions, makeShutdownOwner } from './rig-wiring.js';
 import { parseDuration } from './band.js';
 
 function arg(name: string, fallback: string): string {
@@ -112,9 +112,11 @@ host.start();
 console.log(`floor-service live: room=${rig.roomChannelId} control=${rig.controlThreadId} lease=${leaseMs}ms`);
 
 const bots: ScriptedBot[] = [];
+const botTransports: PortalTransport[] = [];
 for (let i = 1; i <= botCount; i++) {
   const name = `trial-bot-${i}`;
   const t = new PortalTransport(wiring.bots[i - 1]);
+  botTransports.push(t);
   await t.connect();
   const profile = (profiles[i - 1] ?? 'talkative') as import('./bot.js').BotProfile;
   const bot = new ScriptedBot(t, `persona:${rig.personas[name]}`, {
@@ -129,14 +131,18 @@ for (let i = 1; i <= botCount; i++) {
   console.log(`${name} joined (${profile})`);
 }
 
-process.on('SIGINT', () => {
-  host.stop();
-  // Closing while tripped must not lose the suppressed count — one
-  // bounded terminal receipt, no room send (Mica 2026-08-28, seam 2).
-  wiring.breaker?.emitFinalReceipt(Date.now());
-  console.log(
-    `\nledger: trial/runs/${stamp}.jsonl · violations=${host.violations.length} · ` +
-      bots.map((b, i) => `bot${i + 1}:turns=${b.turnsTaken}`).join(' '),
-  );
-  process.exit(0);
+// SIGINT and SIGTERM converge on one idempotent owner: the breaker's
+// terminal receipt lands first (a container stop is SIGTERM — it must
+// not lose the suppressed count), then transports close deliberately.
+const shutdown = makeShutdownOwner({
+  breaker: wiring.breaker,
+  close: [async () => host.stop(), ...[hostTransport, ...botTransports].map((t) => () => t.close())],
+  log: () =>
+    console.log(
+      `\nledger: trial/runs/${stamp}.jsonl · violations=${host.violations.length} · ` +
+        bots.map((b, i) => `bot${i + 1}:turns=${b.turnsTaken}`).join(' '),
+    ),
+  exit: (code) => process.exit(code),
 });
+process.on('SIGINT', () => void shutdown());
+process.on('SIGTERM', () => void shutdown());

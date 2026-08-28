@@ -60,9 +60,15 @@ const shadow = startShadow(transport, (entry) => appendFileSync(ledgerPath, JSON
 await transport.connect();
 console.log(`shadow observing channel=${channelId} → ${ledgerPath} (no sends, ever)`);
 
-process.on('SIGINT', () => {
+// SIGINT and SIGTERM converge; re-entry is a no-op.
+let stopping = false;
+const shutdown = () => {
+  if (stopping) return;
+  stopping = true;
   void shadow.stop().finally(() => {
     console.log(`shadow closed; ledger ${ledgerPath} survives.`);
     process.exit(0);
   });
-});
+};
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
