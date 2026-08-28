@@ -1,7 +1,13 @@
 # FLOOR-RFC-001 — The floor protocol: an order book for speaking turns
 
-- **Status:** Draft rev 8 — trial-hardened, human-contact tested,
+- **Status:** Draft rev 8.1 — trial-hardened, human-contact tested,
   interaction-model settled; observation window closed 2026-08-19.
+  Rev 8.1 closes the two seams from Mica's rev-8 artifact review
+  (2026-08-28): reaffirmation is now a named wire act (§2.2), and the
+  testing ladder's stage 0 is split into rhythm observation vs.
+  counterfactual shadow — the two instruments the earlier text
+  conflated — with identifier-handling named as a disclosure
+  obligation in its own right.
   Founding RFC for `anima-research/floor-control`; revised against ten
   findings from the live multi-agent trial (2026-08-11 → 08-14) and
   Mica's rulings on them (2026-08-13/14), then reconfirmed by the
@@ -17,7 +23,7 @@
   order-book formulation); protocol freeze, identity/registry design, and
   cautions by Sol; precedent curation by Sol; trial review and phase-3
   rulings by Mica.
-- **Date:** 2026-08-06 · rev 5: 2026-08-14 · rev 6: 2026-08-18 · rev 7: 2026-08-18 · rev 8: 2026-08-19
+- **Date:** 2026-08-06 · rev 5: 2026-08-14 · rev 6: 2026-08-18 · rev 7: 2026-08-18 · rev 8: 2026-08-19 · rev 8.1: 2026-08-28
 - **Decision record:** four frames in two days, kept so founding main
   encodes none of the stale ones: *manual-as-definition* (8/5, Sol's lean)
   → *automated-as-definition* (8/6 AM, antra: fluid rooms must not be
@@ -127,8 +133,20 @@ permanently-stale bidder churned offer/decline every six seconds,
 invisible to lapse (declines are engagement), to degradation telemetry,
 and to fairness. The service emits one durable `bid/suspended
 cause=stale-head blockedHead=…`; eligibility returns on **either** an
-authoritative head advance **or** a participant-authored
-revision/reaffirmation bound to the current head — the reaffirmation
+authoritative head advance **or** a participant-authored reaffirmation.
+Reaffirmation is not a new operation (rev 8.1, closing a review seam —
+the act was previously prose-only): it is **`bid/amend` on the
+suspended bid** — wire form `!floor amend <bidId> [fields…]`, where an
+amend carrying no field changes is a pure reaffirmation — or
+equivalently a `bid/create` replacement by the same participant, which
+reaches the same path through the one-bid rule above. Either act bumps
+the revision, returns the bid to `open`, and emits `bid/reactivated
+cause=reaffirmation`. The NEW revision is what re-enters arbitration;
+no head is pinned on the bid — the author reaffirms with the current
+head in view (it is the room's banner), and futility is re-judged at
+the next offer against whatever head holds then, while the suspended
+`(bidId, revision, blockedHead)` tuple itself stays permanently
+un-offerable. The reaffirmation
 path exists because head-staleness is not meaning-staleness (§6): an
 agent whose point survives an intervening message says so explicitly and
 cheaply, rather than being machine-classified as stale. Original queue
@@ -577,14 +595,30 @@ acceptance criterion anywhere in this document.
 
 **Staged path to production contexts** (the testing ladder; live-channel
 idea by Ra, 2026-08-18): the service's consumer-not-gate property permits
-graduated deployment against real rooms. (0) **Shadow mode** — arbiter
-observes a live channel, maintains the book, ledgers what it *would*
-have granted; nobody's behavior changes; calibrates lease/TTL knobs
-against real human+agent rhythms. Prerequisites, both hard: an arbiter
-send-rate circuit breaker, and a ledger content audit against §9's
-metadata-only promise — a measurement instrument pointed at a social
-space carries disclosure and minimization obligations a test channel
-does not. (1) **Compliant-agents-only** — real residents adopt floor
+graduated deployment against real rooms. (0) **Observation, two rungs**
+(rev 8.1 — the earlier text called two different instruments "shadow
+mode"; they are named apart here): **(0a) rhythm observation** — a
+recorder subscribes to a live channel and ledgers turn-taking metadata
+only: gaps, transitions, byte lengths; no book, no arbitration, no text
+field by construction, and zero-send is executable conformance at the
+implementation head rather than a comment. This rung calibrates
+lease/TTL/idle knobs against real human+agent rhythms, and has already
+run in consented form via the 14-day historical-backscroll harvest
+(2026-08-19). **(0b) counterfactual shadow** — the arbiter maintains a
+real book against the live channel and ledgers what it *would* have
+granted, still sending nothing; this is where fairness order diffs
+against actual speaking order (instrument pending; the harvested-data
+fairness-diff replayer is its dry precursor). Nobody's behavior changes
+on either rung. Prerequisites, hard for both: a send-rate circuit
+breaker capping the ROOM's aggregate output across every outbound
+transport, and a ledger content audit against §9's metadata-only
+promise — a measurement instrument pointed at a social space carries
+disclosure and minimization obligations a test channel does not. One of
+those obligations is named precisely because "no text fields"
+understates it: stage-0 records deliberately carry stable author and
+message ids — rehydratable references, not anonymized aggregates — so a
+live-channel run's disclosure and retention terms MUST cover identifier
+handling, not merely content absence. (1) **Compliant-agents-only** — real residents adopt floor
 discipline via their harness adapters (§6); humans untouched. This stage
 is gated on the first production floor adapter existing, and is where the
 wake-economics claim becomes demonstrable. (2) **Gesture-derived
