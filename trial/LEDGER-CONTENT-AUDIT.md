@@ -25,6 +25,8 @@ through it, rather than asserting it.
 | `send-breaker-final` (anomaly) | trip timestamp, suppressed count, notice settlement — shutdown-while-tripped snapshot | metadata |
 | `send-breaker-notice-abandoned` (anomaly) | persona, timestamp — the trip notice never landed | metadata |
 | `speech-rhythm` (shadow) | at, authorId, messageId, byte length, surface, thread presence | metadata — see below |
+| `shadow-outcome` (shadow-bids) | at, participantId, messageId, speech class, contended flag, bid/grant ids | metadata — consenting participants ONLY, see below |
+| `op-unconsented` (shadow-bids) | at, participantId, op verb — **args deliberately dropped** | metadata, minimized |
 
 ## The one repair
 
@@ -58,6 +60,32 @@ through it asserting zero room/control sends
 (`test/shadow-runner.test.ts`; adding any send turns it red). The run
 manifest declares `mode: 'shadow'`.
 
+## Shadow bids (stage 0b, real-shadow-bids form)
+
+`trial/run-shadow-bids.ts` extends the 0a record product with the
+counterfactual book: `op`/`op-error` rows for CONSENTING participants'
+bid-family ops (protocol values only, as in the live host), the book's
+`event` stream (the would-be grant stream — never emitted anywhere), and
+`shadow-outcome` rows classifying each consenting participant's speech
+against the counterfactual floor. Two §9-plus obligations the design doc
+names, both structural here:
+
+- **Fairness rows only about people who opted in.** Non-consenting
+  participants contribute `speech-rhythm` rows exactly as 0a records
+  them — never a `shadow-outcome`. An op from a non-consenting id is
+  ledgered as `op-unconsented` with its verb and NOTHING else (args
+  dropped at the record boundary), and never reaches the book. Pinned by
+  test (`test/shadow-bids.test.ts`, consent-gating case).
+- **Zero-send on both surfaces, executable.** Same seam as 0a: the core
+  accepts the full transport with sends available and only
+  onMessage/close are ever touched; conformance drives the whole
+  counterfactual lifecycle (ops, offers, expiries, idle, shutdown) and
+  asserts zero sends. The run manifest declares `mode: 'shadow-bids'`
+  and carries the consent roster.
+
 Remaining before a live-channel shadow run is *social*, not technical:
-target-channel choice, disclosure to its regulars, and read access for
-the service persona — antra's blessing, all three.
+target-channel choice, disclosure to its regulars (naming identifier
+handling and, for 0b, the consent roster), and read access for the
+service persona — antra's blessing, all three. A 0b run additionally
+needs each consenting agent's operator to have opted in explicitly —
+consent here is per-participant, not per-channel.
