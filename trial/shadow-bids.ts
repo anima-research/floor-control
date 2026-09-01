@@ -214,6 +214,13 @@ export class ShadowBidsCore {
         const acked = this.joined.get(pid);
         if (!acked) throw new Error('join first: bids bind a contract you have acknowledged (§3) — send !floor join');
         if (acked !== c.contractDigest) throw new Error('contract changed since you joined — re-join to acknowledge the new terms');
+        // A zero-read adapter cannot know it currently holds the
+        // counterfactual floor (nothing is ever delivered), so a bid
+        // arriving from the live holder is the compose-start of a
+        // continuation, not an error: the intent is already represented
+        // by the live grant, and the continuation itself is measured as
+        // held-coalesced speech. The op row above records the gesture.
+        if (this.book.liveGrant?.participantId === pid) return;
         this.bidCounter += 1;
         const expires = op.args.expires ? parseDuration(op.args.expires) : null;
         this.book.createBid(
@@ -235,12 +242,30 @@ export class ShadowBidsCore {
         if (op.args.readiness) patch.readinessKind = op.args.readiness;
         if (op.args.subject) patch.subjectRef = op.args.subject;
         if (op.args.digest) patch.payload = { digest: op.args.digest };
-        this.book.amendBid(this.mustId(op), patch, now);
+        this.book.amendBid(op.id ?? this.mustOwnOpenBid(pid, op.verb), patch, now);
         return;
       }
-      case 'cancel':
-        this.book.cancelBid(this.mustId(op), now);
+      case 'cancel': {
+        if (op.id) {
+          this.book.cancelBid(op.id, now);
+          return;
+        }
+        // Zero-read withdrawal races the arbiter: by the time the cancel
+        // lands, the book may have OFFERED against the bid — and the
+        // participant structurally cannot know (nothing is delivered).
+        // The undelivered offer is withdrawn fairness-free (design doc,
+        // withdrawn-bid semantics: cancel before a perceivable offer has
+        // no fairness weight — book.declineGrant directly, not through
+        // the service's terminal bookkeeping), then the bid is cancelled.
+        const live = this.book.liveGrant;
+        if (live && live.participantId === pid && live.state === 'offered') {
+          this.book.declineGrant(live.grantId, now, 'withdrawn-in-shadow');
+          this.book.cancelBid(live.bidId, now);
+          return;
+        }
+        this.book.cancelBid(this.mustOwnOpenBid(pid, op.verb), now);
         return;
+      }
       case 'ack':
         this.book.acknowledged(op.id ?? 'room-head', pid, now);
         return;
@@ -427,8 +452,16 @@ export class ShadowBidsCore {
     this.ledger({ kind: 'idle', at: now, quietMs: now - this.lastActivityAt });
   }
 
-  private mustId(op: FloorOp): string {
-    if (!op.id) throw new Error(`${op.verb} needs an id`);
-    return op.id;
+  /** Shadow inversion of the host's mustId: nothing is ever delivered, so
+   *  a participant can never LEARN a bidId — id-less cancel/amend target
+   *  the sender's own single active bid (the book enforces one per
+   *  participant by replace semantics). An explicit id still works and is
+   *  still validated by the book. */
+  private mustOwnOpenBid(pid: string, verb: string): string {
+    const own = this.book
+      .listBids()
+      .find((b) => b.participantId === pid && (b.state === 'open' || b.state === 'suspended'));
+    if (!own) throw new Error(`${verb}: no open bid of yours to target — bids are per-participant and nothing was pending`);
+    return own.bidId;
   }
 }
