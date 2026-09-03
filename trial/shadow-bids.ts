@@ -149,6 +149,24 @@ export class ShadowBidsCore {
     const room = this.service.registerRoom(locator, provenance, this.logic, t0);
     this.roomId = room.roomId;
     this.rhythm = new ShadowRecorder((entry) => this.ledger(entry));
+    // Self-describing ledger: the run's roster and knobs ride in the record
+    // stream, so the MR report/replay needs no side-channel configuration
+    // and a ledger can never be aggregated under the wrong assumptions.
+    this.ledger({
+      kind: 'run-config',
+      at: t0,
+      locator,
+      provenance,
+      consentingIds: [...this.consenting].sort(),
+      knobs: {
+        tickMs: opts.tickMs ?? 500,
+        burstReleaseMs: opts.burstReleaseMs ?? 2_500,
+        contentionWindowMs: opts.contentionWindowMs ?? 5_000,
+        idleAfterMs: opts.idleAfterMs ?? 60_000,
+        clockGapThresholdMs: opts.clockGapThresholdMs ?? null,
+      },
+      processEpoch: this.book.processEpoch,
+    });
   }
 
   start(): void {
@@ -280,6 +298,14 @@ export class ShadowBidsCore {
    *  participants, accept-on-speech + burst lifecycle. */
   private onSpeech(m: InboundMessage): void {
     const now = m.at;
+    // Settle the book to this speech's own timestamp BEFORE judging it:
+    // release bursts whose window elapsed in the gap, expire overdue
+    // offers, arbitrate. Without this, classification depends on whether a
+    // tick happened to fire during the gap — the same speech classifies
+    // differently under different pump cadences, which the MR agreement
+    // pin caught on its first run. An offer issued by this settle
+    // correctly carries the PREVIOUS head (it predates this message).
+    this.pump(now);
     const prev = this.prevRoom;
     this.prevRoom = { at: now, authorId: m.authorId };
     this.lastRoomMessageId = m.messageId;
